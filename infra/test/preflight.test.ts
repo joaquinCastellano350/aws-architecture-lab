@@ -25,7 +25,7 @@ describe("sandbox deployment preflight", () => {
   it("rejects credentials for an account other than the dedicated sandbox", () => {
     expect(() =>
       runPreflight(validEnvironment(), validDependencies("999999999999")),
-    ).toThrowError(
+    ).toThrow(
       "AWS credentials resolve to account 999999999999, expected sandbox account 123456789012.",
     );
   });
@@ -33,7 +33,7 @@ describe("sandbox deployment preflight", () => {
   it("rejects a deployment region other than us-east-1", () => {
     expect(() =>
       runPreflight(validEnvironment({ AWS_REGION: "sa-east-1" }), validDependencies()),
-    ).toThrowError("AWS region must be us-east-1; received sa-east-1.");
+    ).toThrow("AWS region must be us-east-1; received sa-east-1.");
   });
 
   it("rejects missing or unusable AWS credentials", () => {
@@ -47,7 +47,7 @@ describe("sandbox deployment preflight", () => {
           write: vi.fn(),
         },
       ),
-    ).toThrowError("AWS credentials are missing or unusable: Unable to locate credentials");
+    ).toThrow("AWS credentials are missing or unusable: Unable to locate credentials");
   });
 
   it("rejects a provider mode that could move real money", () => {
@@ -56,7 +56,7 @@ describe("sandbox deployment preflight", () => {
         validEnvironment({ PAYMENT_PROVIDER_MODE: "stripe-live" }),
         validDependencies(),
       ),
-    ).toThrowError(
+    ).toThrow(
       "PAYMENT_PROVIDER_MODE must be fake or stripe-sandbox; received stripe-live.",
     );
   });
@@ -64,13 +64,13 @@ describe("sandbox deployment preflight", () => {
   it("rejects an absent request ceiling", () => {
     expect(() =>
       runPreflight(validEnvironment({ CHECKOUT_REQUEST_CEILING: undefined }), validDependencies()),
-    ).toThrowError("CHECKOUT_REQUEST_CEILING must be an integer from 1 through 9000.");
+    ).toThrow("CHECKOUT_REQUEST_CEILING must be an integer from 1 through 9000.");
   });
 
   it("rejects missing budget notification configuration", () => {
     expect(() =>
       runPreflight(validEnvironment({ BUDGET_NOTIFICATION_EMAIL: undefined }), validDependencies()),
-    ).toThrowError("BUDGET_NOTIFICATION_EMAIL must contain a valid email address.");
+    ).toThrow("BUDGET_NOTIFICATION_EMAIL must contain a valid email address.");
   });
 });
 
