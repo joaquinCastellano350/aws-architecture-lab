@@ -6,9 +6,13 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
+    "deploy:foundation": "npm run build && node dist/bin/deploy-foundation.js",
+    "preflight": "npm run build && node dist/bin/preflight.js",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false",
-    "synth": "npm run build && cdk synth"
+    "synth": "npm run build && cdk synth",
+    "synth:foundation": "npm run build && node dist/bin/synth-foundation.js",
+    "verify:foundation": "npm run build && node dist/bin/verify-foundation.js"
   },
   "dependencies": {
     "aws-cdk-lib": "2.268.0",

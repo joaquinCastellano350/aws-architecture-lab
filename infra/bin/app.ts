@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { App, Tags } from "aws-cdk-lib";
 
+import {
+  EPHEMERAL_STACK_NAME_PREFIX,
+  FOUNDATION_STACK_NAME,
+} from "../lib/foundation-config.js";
 import { MarketplaceCheckoutStack } from "../lib/marketplace-checkout-stack.js";
 import { SandboxFoundationStack } from "../lib/sandbox-foundation-stack.js";
 
@@ -9,12 +13,12 @@ const account = process.env.CDK_DEFAULT_ACCOUNT;
 const region = process.env.CDK_DEFAULT_REGION ?? "us-east-1";
 const environment = account === undefined ? { region } : { account, region };
 
-new SandboxFoundationStack(app, "AwsArchitectureLab-SandboxFoundation", {
+new SandboxFoundationStack(app, FOUNDATION_STACK_NAME, {
   description: "Long-lived, low-cost guardrails for the AWS architecture lab.",
   env: environment,
 });
 
-new MarketplaceCheckoutStack(app, "AwsArchitectureLab-MarketplaceCheckout", {
+new MarketplaceCheckoutStack(app, `${EPHEMERAL_STACK_NAME_PREFIX}MarketplaceCheckout`, {
   description: "Ephemeral marketplace checkout Saga learning workload.",
   env: environment,
 });

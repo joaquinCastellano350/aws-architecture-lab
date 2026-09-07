@@ -11,6 +11,10 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
+    "foundation:deploy": "npm run deploy:foundation --workspace @aws-architecture-lab/infra",
+    "foundation:synth": "npm run synth:foundation --workspace @aws-architecture-lab/infra",
+    "foundation:verify": "npm run verify:foundation --workspace @aws-architecture-lab/infra",
+    "preflight": "npm run preflight --workspace @aws-architecture-lab/infra",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "synth": "npm run synth --workspace @aws-architecture-lab/infra"
