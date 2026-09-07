@@ -6,9 +6,21 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
+    "prebuild": "npm run build --workspace @aws-architecture-lab/contracts",
     "build": "tsc -b",
     "clean": "tsc -b --clean",
+    "pretest": "npm run build --workspace @aws-architecture-lab/contracts",
     "test": "vitest run",
+    "pretypecheck": "npm run build --workspace @aws-architecture-lab/contracts",
     "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@aws-architecture-lab/contracts": "*",
+    "@aws-sdk/client-dynamodb": "3.1127.0",
+    "@aws-sdk/client-sfn": "3.1127.0",
+    "@aws-sdk/lib-dynamodb": "3.1127.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "8.10.163"
   }
 }

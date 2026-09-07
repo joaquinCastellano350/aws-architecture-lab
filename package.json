@@ -15,6 +15,10 @@
     "foundation:synth": "npm run synth:foundation --workspace @aws-architecture-lab/infra",
     "foundation:verify": "npm run verify:foundation --workspace @aws-architecture-lab/infra",
     "preflight": "npm run preflight --workspace @aws-architecture-lab/infra",
+    "workload:deploy": "npm run deploy:workload --workspace @aws-architecture-lab/infra",
+    "workload:destroy": "npm run destroy:workload --workspace @aws-architecture-lab/infra",
+    "workload:smoke": "npm run smoke:workload --workspace @aws-architecture-lab/infra",
+    "workload:synth": "npm run synth:workload --workspace @aws-architecture-lab/infra",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "synth": "npm run synth --workspace @aws-architecture-lab/infra"
@@ -24,6 +28,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "0.28.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
   }

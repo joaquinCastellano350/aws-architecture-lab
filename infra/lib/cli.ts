@@ -18,3 +18,12 @@ export function executeCli(command: () => void): void {
     process.exitCode = 1;
   }
 }
+
+export async function executeAsyncCli(command: () => Promise<void>): Promise<void> {
+  try {
+    await command();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
+}

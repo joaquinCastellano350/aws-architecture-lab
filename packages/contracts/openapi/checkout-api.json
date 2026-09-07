@@ -1,0 +1,127 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Marketplace Checkout API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/checkouts": {
+      "post": {
+        "operationId": "submitCheckout",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SubmitCheckoutRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Checkout admitted for asynchronous processing",
+            "headers": {
+              "Location": { "schema": { "type": "string" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SubmitCheckoutResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Problem" },
+          "409": { "$ref": "#/components/responses/Problem" }
+        },
+        "security": [{ "sigv4": [] }]
+      }
+    },
+    "/checkouts/{checkoutId}": {
+      "get": {
+        "operationId": "getCheckout",
+        "parameters": [
+          {
+            "name": "checkoutId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Customer-safe checkout status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CheckoutStatusResponse" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Problem" }
+        },
+        "security": [{ "sigv4": [] }]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sigv4": { "type": "apiKey", "name": "Authorization", "in": "header", "x-amazon-apigateway-authtype": "awsSigv4" }
+    },
+    "responses": {
+      "Problem": {
+        "description": "Request could not be completed",
+        "content": {
+          "application/problem+json": {
+            "schema": { "$ref": "#/components/schemas/Problem" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "SubmitCheckoutRequest": {
+        "type": "object",
+        "required": ["contractVersion", "cartId", "correlationId"],
+        "properties": {
+          "contractVersion": { "type": "string", "enum": ["1.0"] },
+          "cartId": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+        },
+        "additionalProperties": true
+      },
+      "SubmitCheckoutResponse": {
+        "type": "object",
+        "required": ["checkoutId", "statusLocation"],
+        "properties": {
+          "checkoutId": { "type": "string" },
+          "statusLocation": { "type": "string" }
+        }
+      },
+      "CheckoutStatusResponse": {
+        "type": "object",
+        "required": ["checkoutId", "status", "correlationId", "createdAt", "updatedAt"],
+        "properties": {
+          "checkoutId": { "type": "string" },
+          "status": { "type": "string", "enum": ["PENDING"] },
+          "correlationId": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "required": ["type", "title", "status"],
+        "properties": {
+          "type": { "type": "string" },
+          "title": { "type": "string" },
+          "status": { "type": "integer" },
+          "detail": { "type": "string" }
+        }
+      }
+    }
+  }
+}

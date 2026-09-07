@@ -76,3 +76,24 @@ aws secretsmanager put-secret-value `
 
 `foundation:verify` reads stack, processed-template, budget, action, anomaly, IAM-policy,
 and secret metadata. It deliberately never calls `secretsmanager get-secret-value`.
+
+## Marketplace checkout walking skeleton
+
+The first ephemeral workload exposes the OpenAPI-defined `POST /checkouts` and
+`GET /checkouts/{checkoutId}` operations. Both require IAM/SigV4. Submission is
+asynchronous: a successful POST returns `202 Accepted` and a status location while a
+Step Functions Standard execution, admitted through the `LIVE` alias, creates the
+customer-visible pending Order.
+
+After the foundation has been deployed, use the same preflight environment shown above:
+
+```shell
+npm run workload:synth
+npm run workload:deploy
+npm run workload:smoke
+npm run workload:destroy
+```
+
+The smoke command signs real API requests with the active AWS credentials, repeats the
+POST to prove idempotent admission, and polls GET until the pending Order is visible.
+Destroy removes the ephemeral workload and verifies that the foundation stack remains.

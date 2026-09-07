@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:order:create-pending:v1",
+  "title": "CreatePendingOrderCommand",
+  "type": "object",
+  "required": ["schemaVersion", "checkoutId", "cartId", "correlationId"],
+  "properties": {
+    "schemaVersion": { "type": "string", "enum": ["1.0"] },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "cartId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+  },
+  "additionalProperties": true
+}

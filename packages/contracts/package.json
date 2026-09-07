@@ -6,9 +6,10 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -b",
+    "generate": "node scripts/generate-checkout-api.mjs && node scripts/generate-order-command.mjs",
+    "build": "npm run generate && tsc -b",
     "clean": "tsc -b --clean",
-    "test": "vitest run --passWithNoTests",
-    "typecheck": "tsc -b --pretty false"
+    "test": "npm run generate && vitest run --passWithNoTests",
+    "typecheck": "npm run generate && tsc -b --pretty false"
   }
 }

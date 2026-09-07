@@ -2,8 +2,8 @@
 import { App, Tags } from "aws-cdk-lib";
 
 import {
-  EPHEMERAL_STACK_NAME_PREFIX,
   FOUNDATION_STACK_NAME,
+  MARKETPLACE_CHECKOUT_STACK_NAME,
 } from "../lib/foundation-config.js";
 import { MarketplaceCheckoutStack } from "../lib/marketplace-checkout-stack.js";
 import { SandboxFoundationStack } from "../lib/sandbox-foundation-stack.js";
@@ -18,7 +18,7 @@ new SandboxFoundationStack(app, FOUNDATION_STACK_NAME, {
   env: environment,
 });
 
-new MarketplaceCheckoutStack(app, `${EPHEMERAL_STACK_NAME_PREFIX}MarketplaceCheckout`, {
+new MarketplaceCheckoutStack(app, MARKETPLACE_CHECKOUT_STACK_NAME, {
   description: "Ephemeral marketplace checkout Saga learning workload.",
   env: environment,
 });

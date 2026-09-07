@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:order:create-pending-outcome:v1",
+  "title": "CreatePendingOrderOutcome",
+  "type": "object",
+  "required": ["schemaVersion", "checkoutId", "correlationId", "status"],
+  "properties": {
+    "schemaVersion": { "type": "string", "enum": ["1.0"] },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "status": { "type": "string", "enum": ["PENDING"] }
+  },
+  "additionalProperties": true
+}
