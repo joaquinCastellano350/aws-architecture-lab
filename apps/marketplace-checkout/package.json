@@ -1,0 +1,14 @@
+{
+  "name": "@aws-architecture-lab/marketplace-checkout",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "vitest run",
+    "typecheck": "tsc -b --pretty false"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "aws-architecture-lab",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A cost-conscious AWS architecture learning lab and portfolio.",
+  "workspaces": [
+    "apps/*",
+    "infra",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "clean": "npm run clean --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "synth": "npm run synth --workspace @aws-architecture-lab/infra"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}

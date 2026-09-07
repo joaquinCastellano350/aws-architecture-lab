@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./apps/marketplace-checkout" },
+    { "path": "./infra" },
+    { "path": "./packages/contracts" },
+    { "path": "./packages/test-kit" }
+  ]
+}
