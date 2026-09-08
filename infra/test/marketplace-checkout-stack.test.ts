@@ -2,7 +2,10 @@ import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 
-import { MarketplaceCheckoutStack } from "../lib/marketplace-checkout-stack.js";
+import {
+  MarketplaceCheckoutStack,
+  type MarketplaceCheckoutStackProps,
+} from "../lib/marketplace-checkout-stack.js";
 
 const template = workloadTemplate();
 
@@ -99,7 +102,31 @@ describe("marketplace checkout walking skeleton", () => {
     expect(policies).toContain(":*");
   });
 
-  it("uses short-lived logs and bounded API and Lambda capacity", () => {
+  it("authorizes workflow starts against the state machine and only through LIVE", () => {
+    const stateMachineLogicalIds = Object.keys(
+      template.findResources("AWS::StepFunctions::StateMachine"),
+    );
+    expect(stateMachineLogicalIds).toHaveLength(1);
+
+    const startExecutionStatements = Object.values(template.findResources("AWS::IAM::Policy"))
+      .flatMap((policy) => policy.Properties?.PolicyDocument?.Statement ?? [])
+      .filter((statement) => statement.Action === "states:StartExecution");
+
+    expect(startExecutionStatements).toEqual([
+      {
+        Action: "states:StartExecution",
+        Effect: "Allow",
+        Resource: { Ref: stateMachineLogicalIds[0] },
+        Condition: {
+          "ForAnyValue:StringEquals": {
+            "states:StateMachineQualifier": ["LIVE"],
+          },
+        },
+      },
+    ]);
+  });
+
+  it("uses short-lived logs and bounded API capacity without reserving Lambda capacity by default", () => {
     template.hasResourceProperties("AWS::ApiGateway::Stage", {
       MethodSettings: Match.arrayWith([
         Match.objectLike({
@@ -118,12 +145,32 @@ describe("marketplace checkout walking skeleton", () => {
     const functions = Object.values(template.findResources("AWS::Lambda::Function"));
     expect(functions).toHaveLength(2);
     for (const fn of functions) {
-      expect(fn.Properties?.ReservedConcurrentExecutions).toBeLessThanOrEqual(10);
+      expect(fn.Properties?.ReservedConcurrentExecutions).toBeUndefined();
     }
+  });
+
+  it(
+    "applies configured reserved concurrency to each Lambda",
+    () => {
+      const configuredTemplate = workloadTemplate({ lambdaReservedConcurrency: 3 });
+      const functions = Object.values(configuredTemplate.findResources("AWS::Lambda::Function"));
+
+      expect(functions).toHaveLength(2);
+      for (const fn of functions) {
+        expect(fn.Properties?.ReservedConcurrentExecutions).toBe(3);
+      }
+    },
+    60_000,
+  );
+
+  it.each([0, -1, 1.5, 11])("rejects unsafe reserved concurrency %s", (value) => {
+    expect(() => workloadTemplate({ lambdaReservedConcurrency: value })).toThrow(
+      "lambdaReservedConcurrency must be an integer from 1 through 10 when set.",
+    );
   });
 });
 
-function workloadTemplate(): Template {
+function workloadTemplate(props: MarketplaceCheckoutStackProps = {}): Template {
   const app = new App();
-  return Template.fromStack(new MarketplaceCheckoutStack(app, "Workload"));
+  return Template.fromStack(new MarketplaceCheckoutStack(app, "Workload", props));
 }

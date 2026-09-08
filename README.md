@@ -44,6 +44,21 @@ $env:CHECKOUT_REQUEST_CEILING = "20" # hard maximum: 9000
 $env:BUDGET_NOTIFICATION_EMAIL = "owner@example.com"
 ```
 
+`LAMBDA_RESERVED_CONCURRENCY` is optional and applies to each marketplace-checkout Lambda.
+Leave it unset when the account has no reservable concurrency, such as a new account with a
+total concurrency quota of 10. Accounts with sufficient quota can opt in with a value from 1
+through 10:
+
+```powershell
+# Constrained sandbox: remove the setting instead of assigning zero.
+Remove-Item Env:LAMBDA_RESERVED_CONCURRENCY -ErrorAction SilentlyContinue
+
+# Account with enough reservable concurrency: reserve this amount per Lambda.
+$env:LAMBDA_RESERVED_CONCURRENCY = "3"
+```
+
+Do not set it to `0`: Lambda uses zero reserved concurrency to disable function invocations.
+
 Then use the repeatable entry points from the repository root:
 
 ```shell

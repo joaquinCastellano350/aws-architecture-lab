@@ -7,6 +7,7 @@ import {
 } from "../lib/foundation-config.js";
 import { MarketplaceCheckoutStack } from "../lib/marketplace-checkout-stack.js";
 import { SandboxFoundationStack } from "../lib/sandbox-foundation-stack.js";
+import { marketplaceCheckoutConfiguration } from "../lib/workload-config.js";
 
 const app = new App();
 const account = process.env.CDK_DEFAULT_ACCOUNT;
@@ -21,6 +22,7 @@ new SandboxFoundationStack(app, FOUNDATION_STACK_NAME, {
 new MarketplaceCheckoutStack(app, MARKETPLACE_CHECKOUT_STACK_NAME, {
   description: "Ephemeral marketplace checkout Saga learning workload.",
   env: environment,
+  ...marketplaceCheckoutConfiguration(process.env),
 });
 
 Tags.of(app).add("project", "aws-architecture-lab");

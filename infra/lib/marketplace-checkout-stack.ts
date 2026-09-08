@@ -37,9 +37,26 @@ import type { Construct } from "constructs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 
+export interface MarketplaceCheckoutStackProps extends StackProps {
+  readonly lambdaReservedConcurrency?: number;
+}
+
 export class MarketplaceCheckoutStack extends Stack {
-  public constructor(scope: Construct, id: string, props: StackProps = {}) {
-    super(scope, id, props);
+  private readonly lambdaReservedConcurrency: number | undefined;
+
+  public constructor(scope: Construct, id: string, props: MarketplaceCheckoutStackProps = {}) {
+    const { lambdaReservedConcurrency, ...stackProps } = props;
+    super(scope, id, stackProps);
+
+    if (
+      lambdaReservedConcurrency !== undefined &&
+      (!Number.isInteger(lambdaReservedConcurrency) ||
+        lambdaReservedConcurrency < 1 ||
+        lambdaReservedConcurrency > 10)
+    ) {
+      throw new Error("lambdaReservedConcurrency must be an integer from 1 through 10 when set.");
+    }
+    this.lambdaReservedConcurrency = lambdaReservedConcurrency;
 
     Tags.of(this).add("project", "aws-architecture-lab");
     Tags.of(this).add("environment", "sandbox");
@@ -135,7 +152,12 @@ export class MarketplaceCheckoutStack extends Stack {
     apiFunction.addToRolePolicy(
       new PolicyStatement({
         actions: ["states:StartExecution"],
-        resources: [workflowAlias.attrArn],
+        resources: [stateMachine.stateMachineArn],
+        conditions: {
+          "ForAnyValue:StringEquals": {
+            "states:StateMachineQualifier": ["LIVE"],
+          },
+        },
       }),
     );
     apiFunction.addToRolePolicy(
@@ -214,7 +236,9 @@ export class MarketplaceCheckoutStack extends Stack {
       handler: "handler",
       logGroup,
       memorySize: 256,
-      reservedConcurrentExecutions: 10,
+      ...(this.lambdaReservedConcurrency === undefined
+        ? {}
+        : { reservedConcurrentExecutions: this.lambdaReservedConcurrency }),
       timeout: Duration.seconds(10),
     });
   }
