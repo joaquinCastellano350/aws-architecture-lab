@@ -8,7 +8,8 @@
     "schemaVersion": { "type": "string", "enum": ["1.0"] },
     "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
     "cartId": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "causationId": { "type": "string", "minLength": 1, "maxLength": 256 }
   },
   "additionalProperties": true
 }

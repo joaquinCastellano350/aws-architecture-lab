@@ -110,5 +110,8 @@ npm run workload:destroy
 ```
 
 The smoke command signs real API requests with the active AWS credentials, repeats the
-POST to prove idempotent admission, and polls GET until the pending Order is visible.
-Destroy removes the ephemeral workload and verifies that the foundation stack remains.
+POST to prove idempotent admission, and polls GET until the pending Order is visible. It
+then waits for the committed `OrderPending` fact in the audit table, republishes that
+event alongside a distinct event, and proves the audit consumer deduplicates the replay
+without dropping the distinct fact. Destroy removes the ephemeral workload and verifies
+that the foundation stack remains.

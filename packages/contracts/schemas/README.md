@@ -5,6 +5,6 @@ truth for commands, outcomes, and domain events. `npm run generate` in the contr
 workspace regenerates TypeScript types and runtime validators; generated files are not
 maintained independently.
 
-The walking skeleton currently defines the versioned Create Pending Order command and
-outcome. Later increments add Inventory, Payment, Fulfillment, event, and compensation
-schemas without changing this v1 contract in place.
+The contracts currently define the versioned Create Pending Order command and outcome,
+plus the OrderPending domain-event envelope. Later increments add Inventory, Payment,
+Fulfillment, and compensation schemas without changing these v1 contracts in place.

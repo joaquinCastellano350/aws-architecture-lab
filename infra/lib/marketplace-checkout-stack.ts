@@ -16,11 +16,22 @@ import {
 } from "aws-cdk-lib";
 import { ApiDefinition, MethodLoggingLevel, SpecRestApi } from "aws-cdk-lib/aws-apigateway";
 import { Dashboard, GraphWidget } from "aws-cdk-lib/aws-cloudwatch";
-import { AttributeType, BillingMode, Table, TableEncryption } from "aws-cdk-lib/aws-dynamodb";
+import {
+  AttributeType,
+  BillingMode,
+  StreamViewType,
+  Table,
+  TableEncryption,
+  type ITable,
+} from "aws-cdk-lib/aws-dynamodb";
+import { EventBus, Rule } from "aws-cdk-lib/aws-events";
+import { LambdaFunction as EventBridgeLambdaFunction } from "aws-cdk-lib/aws-events-targets";
 import { PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
-import { CfnVersion, Runtime, type IFunction } from "aws-cdk-lib/aws-lambda";
+import { CfnVersion, Runtime, StartingPosition, type IFunction } from "aws-cdk-lib/aws-lambda";
+import { DynamoEventSource, SqsDlq } from "aws-cdk-lib/aws-lambda-event-sources";
 import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
+import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import {
   CfnStateMachineAlias,
   CfnStateMachineVersion,
@@ -36,6 +47,8 @@ import { LambdaInvoke } from "aws-cdk-lib/aws-stepfunctions-tasks";
 import type { Construct } from "constructs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
+const orderEventSource = "aws-architecture-lab.order";
+const orderPendingEventType = "OrderPending";
 
 export interface MarketplaceCheckoutStackProps extends StackProps {
   readonly lambdaReservedConcurrency?: number;
@@ -77,11 +90,74 @@ export class MarketplaceCheckoutStack extends Stack {
       maxWriteRequestUnits: 100,
       removalPolicy: RemovalPolicy.DESTROY,
     });
+    const orderOutboxTable = new Table(this, "OrderOutbox", {
+      partitionKey: { name: "eventId", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+      stream: StreamViewType.NEW_IMAGE,
+    });
+    const auditTable = new Table(this, "OrderAudit", {
+      partitionKey: { name: "eventId", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const eventBus = new EventBus(this, "CheckoutEvents", {
+      eventBusName: "aws-architecture-lab-marketplace-checkout",
+    });
+    const failedOutboxRecords = new Queue(this, "OrderOutboxFailureDestination", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(4),
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const outboxPublisher = this.lambdaFunction("OrderOutboxPublisher", "outbox-publisher.ts", {
+      EVENT_BUS_NAME: eventBus.eventBusName,
+      EVENT_SOURCE: orderEventSource,
+    });
+    // The stream-enabled Table satisfies ITable at runtime; TS 7 exact optional
+    // properties exposes an upstream declaration mismatch on tableStreamArn.
+    outboxPublisher.addEventSource(new DynamoEventSource(orderOutboxTable as ITable, {
+      batchSize: 10,
+      bisectBatchOnError: true,
+      onFailure: new SqsDlq(failedOutboxRecords),
+      reportBatchItemFailures: true,
+      retryAttempts: 3,
+      startingPosition: StartingPosition.LATEST,
+    }));
+    eventBus.grantPutEventsTo(outboxPublisher);
+
+    const auditConsumer = this.lambdaFunction("OrderAuditConsumer", "audit-consumer.ts", {
+      AUDIT_TABLE_NAME: auditTable.tableName,
+      EVENT_SOURCE: orderEventSource,
+    });
+    auditTable.grantWriteData(auditConsumer);
+    new Rule(this, "OrderPendingAuditRule", {
+      eventBus,
+      eventPattern: {
+        source: [orderEventSource],
+        detailType: [orderPendingEventType],
+      },
+      targets: [new EventBridgeLambdaFunction(auditConsumer, {
+        maxEventAge: Duration.minutes(5),
+        retryAttempts: 2,
+      })],
+    });
 
     const orderFunction = this.lambdaFunction("OrderCommand", "order-lambda.ts", {
       ORDER_TABLE_NAME: orderTable.tableName,
+      ORDER_OUTBOX_TABLE_NAME: orderOutboxTable.tableName,
     });
     orderTable.grantReadWriteData(orderFunction);
+    orderOutboxTable.grantWriteData(orderFunction);
+    orderFunction.addToRolePolicy(new PolicyStatement({
+      actions: ["dynamodb:TransactWriteItems"],
+      resources: [orderTable.tableArn, orderOutboxTable.tableArn],
+    }));
     const orderFunctionVersion = orderFunction.currentVersion;
     const cfnOrderFunctionVersion = orderFunctionVersion.node.defaultChild as CfnVersion;
     retainAcrossDeployments(cfnOrderFunctionVersion);
@@ -99,6 +175,7 @@ export class MarketplaceCheckoutStack extends Stack {
         checkoutId: JsonPath.stringAt("$.checkoutId"),
         cartId: JsonPath.stringAt("$.cartId"),
         correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
       }),
       payloadResponseOnly: true,
       resultPath: "$.order",
@@ -209,6 +286,13 @@ export class MarketplaceCheckoutStack extends Stack {
     new CfnOutput(this, "CheckoutApiUrl", { value: api.url });
     new CfnOutput(this, "CheckoutWorkflowAliasArn", { value: workflowAlias.attrArn });
     new CfnOutput(this, "CheckoutWorkflowVersionArn", { value: workflowVersion.attrArn });
+    new CfnOutput(this, "CheckoutEventBusName", { value: eventBus.eventBusName });
+    new CfnOutput(this, "OrderAuditTableName", { value: auditTable.tableName });
+    new CfnOutput(this, "OrderAuditConsumerLogGroupName", {
+      value: auditConsumer.logGroup.logGroupName,
+    });
+    new CfnOutput(this, "OrderEventSource", { value: orderEventSource });
+    new CfnOutput(this, "OrderPendingEventType", { value: orderPendingEventType });
   }
 
   private lambdaFunction(

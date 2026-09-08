@@ -5,6 +5,7 @@ export interface CreatePendingOrderCommand {
   readonly checkoutId: string;
   readonly cartId: string;
   readonly correlationId: string;
+  readonly causationId?: string;
   readonly [key: string]: unknown;
 }
 
@@ -29,7 +30,8 @@ export function validateCreatePendingOrderCommand(
     (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || !["1.0"].includes((input as Record<string, unknown>)["schemaVersion"] as string)) ||
     (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
     (typeof (input as Record<string, unknown>)["cartId"] !== "string" || String((input as Record<string, unknown>)["cartId"]).length < 1 || String((input as Record<string, unknown>)["cartId"]).length > 128) ||
-    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128)
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    ((input as Record<string, unknown>)["causationId"] !== undefined && (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256))
   ) {
     return { ok: false, error: "Value does not match CreatePendingOrderCommand" };
   }

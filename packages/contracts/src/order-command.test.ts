@@ -12,12 +12,20 @@ describe("Order command JSON schemas", () => {
       checkoutId: "checkout-123",
       cartId: "cart-123",
       correlationId: "corr-123",
+      causationId: "command-123",
     }).ok).toBe(true);
     expect(validateCreatePendingOrderOutcome({
       schemaVersion: "1.0",
       checkoutId: "checkout-123",
       correlationId: "corr-123",
+      causationId: "command-123",
       status: "PENDING",
+    }).ok).toBe(true);
+    expect(validateCreatePendingOrderCommand({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-from-older-workflow",
+      cartId: "cart-123",
+      correlationId: "corr-123",
     }).ok).toBe(true);
   });
 

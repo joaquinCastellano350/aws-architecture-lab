@@ -5,3 +5,4 @@ export const contractStrategy = {
 
 export * from "./generated/checkout-api.js";
 export * from "./generated/order-command.js";
+export * from "./generated/order-event.js";

@@ -38,8 +38,20 @@ export function objectValidatorLines({
 
 export function invalidValueExpression(value, schema) {
   const checks = [];
+  if (schema.type === "object") {
+    checks.push(`typeof ${value} !== "object"`);
+    checks.push(`${value} === null`);
+    checks.push(`Array.isArray(${value})`);
+    const required = new Set(schema.required ?? []);
+    for (const [name, property] of Object.entries(schema.properties ?? {})) {
+      const nestedValue = `(${value} as Record<string, unknown>)[${JSON.stringify(name)}]`;
+      const condition = invalidValueExpression(nestedValue, property);
+      checks.push(required.has(name) ? condition : `(${nestedValue} !== undefined && ${condition})`);
+    }
+  }
   if (schema.type === "string") {
     checks.push(`typeof ${value} !== "string"`);
+    if (Object.hasOwn(schema, "const")) checks.push(`${value} !== ${JSON.stringify(schema.const)}`);
     if (schema.minLength !== undefined) checks.push(`String(${value}).length < ${schema.minLength}`);
     if (schema.maxLength !== undefined) checks.push(`String(${value}).length > ${schema.maxLength}`);
     if (schema.enum !== undefined) {
@@ -60,6 +72,15 @@ export function invalidValueExpression(value, schema) {
 function typescriptType(schema) {
   if (Object.hasOwn(schema, "const")) return JSON.stringify(schema.const);
   if (schema.enum !== undefined) return schema.enum.map(JSON.stringify).join(" | ");
+  if (schema.type === "object") {
+    const required = new Set(schema.required ?? []);
+    const properties = Object.entries(schema.properties ?? {}).map(([name, property]) => {
+      const optional = required.has(name) ? "" : "?";
+      return `readonly ${name}${optional}: ${typescriptType(property)}`;
+    });
+    if (schema.additionalProperties === true) properties.push("readonly [key: string]: unknown");
+    return `{ ${properties.join("; ")} }`;
+  }
   if (schema.type === "integer" || schema.type === "number") return "number";
   if (schema.type === "boolean") return "boolean";
   return "string";

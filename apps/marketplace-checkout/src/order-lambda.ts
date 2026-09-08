@@ -8,11 +8,12 @@ import { createPendingOrder } from "./dynamo-order-repository.js";
 import { requiredEnvironment } from "./environment.js";
 
 const orderTableName = requiredEnvironment("ORDER_TABLE_NAME");
+const outboxTableName = requiredEnvironment("ORDER_OUTBOX_TABLE_NAME");
 
 export const handler: Handler<unknown, CreatePendingOrderOutcome> = async (event) => {
   const validation = validateCreatePendingOrderCommand(event);
   if (!validation.ok) throw new Error(validation.error);
-  const order = await createPendingOrder(orderTableName, validation.value);
+  const order = await createPendingOrder(orderTableName, outboxTableName, validation.value);
   console.info(JSON.stringify({
     event: "OrderPending",
     checkoutId: order.checkoutId,

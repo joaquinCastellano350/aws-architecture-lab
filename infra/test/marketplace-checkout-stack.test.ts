@@ -33,7 +33,7 @@ describe("marketplace checkout walking skeleton", () => {
   });
 
   it("gives Order and Saga Execution separately owned durable records", () => {
-    template.resourceCountIs("AWS::DynamoDB::Table", 2);
+    template.resourceCountIs("AWS::DynamoDB::Table", 4);
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       KeySchema: [{ AttributeName: "checkoutId", KeyType: "HASH" }],
       SSESpecification: { SSEEnabled: true },
@@ -48,13 +48,61 @@ describe("marketplace checkout walking skeleton", () => {
     });
 
     const tables = Object.values(template.findResources("AWS::DynamoDB::Table"));
-    expect(tables).toHaveLength(2);
+    expect(tables).toHaveLength(4);
     for (const table of tables) {
       expect(table.DeletionPolicy).toBe("Delete");
       expect(table.UpdateReplacePolicy).toBe("Delete");
       expect(table.Properties?.PointInTimeRecoverySpecification).toBeUndefined();
       expect(table.Properties?.SSESpecification?.KMSMasterKeyId).toBeUndefined();
     }
+  });
+
+  it("publishes the Order outbox through a retryable stream and deduplicating audit consumer", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      KeySchema: [{ AttributeName: "eventId", KeyType: "HASH" }],
+      StreamSpecification: { StreamViewType: "NEW_IMAGE" },
+    });
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      KeySchema: [{ AttributeName: "eventId", KeyType: "HASH" }],
+      StreamSpecification: Match.absent(),
+    });
+    template.resourceCountIs("AWS::Events::EventBus", 1);
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: {
+        source: ["aws-architecture-lab.order"],
+        "detail-type": ["OrderPending"],
+      },
+      EventBusName: Match.anyValue(),
+      Targets: Match.arrayWith([Match.objectLike({
+        Arn: Match.anyValue(),
+        RetryPolicy: {
+          MaximumEventAgeInSeconds: 300,
+          MaximumRetryAttempts: 2,
+        },
+      })]),
+    });
+    template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+      BatchSize: 10,
+      BisectBatchOnFunctionError: true,
+      FunctionResponseTypes: ["ReportBatchItemFailures"],
+      MaximumRetryAttempts: 3,
+      StartingPosition: "LATEST",
+      DestinationConfig: {
+        OnFailure: { Destination: Match.anyValue() },
+      },
+    });
+    template.hasResourceProperties("AWS::SQS::Queue", {
+      SqsManagedSseEnabled: true,
+    });
+
+    const functions = Object.values(template.findResources("AWS::Lambda::Function"));
+    expect(functions.some((fn) => fn.Properties?.Environment?.Variables?.ORDER_OUTBOX_TABLE_NAME !== undefined)).toBe(true);
+    expect(functions.some((fn) => fn.Properties?.Environment?.Variables?.EVENT_BUS_NAME !== undefined)).toBe(true);
+    expect(functions.some((fn) => fn.Properties?.Environment?.Variables?.AUDIT_TABLE_NAME !== undefined)).toBe(true);
+
+    const policies = JSON.stringify(template.findResources("AWS::IAM::Policy"));
+    expect(policies).toContain("dynamodb:TransactWriteItems");
+    expect(policies).toContain("events:PutEvents");
   });
 
   it("starts new checkouts through LIVE targeting one immutable Standard workflow version", () => {
@@ -143,7 +191,7 @@ describe("marketplace checkout walking skeleton", () => {
     });
 
     const functions = Object.values(template.findResources("AWS::Lambda::Function"));
-    expect(functions).toHaveLength(2);
+    expect(functions).toHaveLength(4);
     for (const fn of functions) {
       expect(fn.Properties?.ReservedConcurrentExecutions).toBeUndefined();
     }
@@ -155,7 +203,7 @@ describe("marketplace checkout walking skeleton", () => {
       const configuredTemplate = workloadTemplate({ lambdaReservedConcurrency: 3 });
       const functions = Object.values(configuredTemplate.findResources("AWS::Lambda::Function"));
 
-      expect(functions).toHaveLength(2);
+      expect(functions).toHaveLength(4);
       for (const fn of functions) {
         expect(fn.Properties?.ReservedConcurrentExecutions).toBe(3);
       }
