@@ -10,6 +10,8 @@ export interface SubmitCheckoutRequest {
   readonly contractVersion: "1.0";
   readonly cartId: string;
   readonly correlationId: string;
+  readonly itemId?: string;
+  readonly quantity?: number;
   readonly [key: string]: unknown;
 }
 
@@ -20,7 +22,7 @@ export interface SubmitCheckoutResponse {
 
 export interface CheckoutStatusResponse {
   readonly checkoutId: string;
-  readonly status: "PENDING";
+  readonly status: "PENDING" | "INVENTORY_UNAVAILABLE";
   readonly correlationId: string;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -67,7 +69,9 @@ export function validateSubmitCheckoutRequest(
     input === null ||
     (typeof (input as Record<string, unknown>)["contractVersion"] !== "string" || !["1.0"].includes((input as Record<string, unknown>)["contractVersion"] as string)) ||
     (typeof (input as Record<string, unknown>)["cartId"] !== "string" || String((input as Record<string, unknown>)["cartId"]).length < 1 || String((input as Record<string, unknown>)["cartId"]).length > 128) ||
-    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128)
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    ((input as Record<string, unknown>)["itemId"] !== undefined && (typeof (input as Record<string, unknown>)["itemId"] !== "string" || String((input as Record<string, unknown>)["itemId"]).length < 1 || String((input as Record<string, unknown>)["itemId"]).length > 128)) ||
+    ((input as Record<string, unknown>)["quantity"] !== undefined && (typeof (input as Record<string, unknown>)["quantity"] !== "number" || !Number.isInteger(Number((input as Record<string, unknown>)["quantity"])) || Number((input as Record<string, unknown>)["quantity"]) < 1 || Number((input as Record<string, unknown>)["quantity"]) > 1000))
   ) {
     return { ok: false, error: "Request body does not match SubmitCheckoutRequest v1.0" };
   }
@@ -95,7 +99,7 @@ export function validateCheckoutStatusResponse(
     typeof input !== "object" ||
     input === null ||
     (typeof (input as Record<string, unknown>)["checkoutId"] !== "string") ||
-    (typeof (input as Record<string, unknown>)["status"] !== "string" || !["PENDING"].includes((input as Record<string, unknown>)["status"] as string)) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || !["PENDING", "INVENTORY_UNAVAILABLE"].includes((input as Record<string, unknown>)["status"] as string)) ||
     (typeof (input as Record<string, unknown>)["correlationId"] !== "string") ||
     (typeof (input as Record<string, unknown>)["createdAt"] !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test((input as Record<string, unknown>)["createdAt"] as string) || Number.isNaN(Date.parse((input as Record<string, unknown>)["createdAt"] as string))) ||
     (typeof (input as Record<string, unknown>)["updatedAt"] !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test((input as Record<string, unknown>)["updatedAt"] as string) || Number.isNaN(Date.parse((input as Record<string, unknown>)["updatedAt"] as string)))

@@ -6,5 +6,6 @@ workspace regenerates TypeScript types and runtime validators; generated files a
 maintained independently.
 
 The contracts currently define the versioned Create Pending Order command and outcome,
-plus the OrderPending domain-event envelope. Later increments add Inventory, Payment,
-Fulfillment, and compensation schemas without changing these v1 contracts in place.
+the Order domain-event envelopes, and Inventory reserve, commit, release, outcome, and
+event contracts. Later increments add Payment, Fulfillment, and compensation schemas
+without changing these v1 contracts in place.

@@ -5,6 +5,8 @@ import { interfaceLines, objectValidatorLines } from "./schema-codegen.mjs";
 const definitions = await Promise.all([
   load("create-pending-order-command.v1.json", "validateCreatePendingOrderCommand"),
   load("create-pending-order-outcome.v1.json", "validateCreatePendingOrderOutcome"),
+  load("mark-order-inventory-unavailable-command.v1.json", "validateMarkOrderInventoryUnavailableCommand"),
+  load("mark-order-inventory-unavailable-outcome.v1.json", "validateMarkOrderInventoryUnavailableOutcome"),
 ]);
 const lines = [
   "// Generated from schemas/create-pending-order-*.v1.json. Do not edit by hand.",

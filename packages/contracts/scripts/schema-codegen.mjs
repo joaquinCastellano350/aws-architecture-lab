@@ -64,6 +64,9 @@ export function invalidValueExpression(value, schema) {
   }
   if (schema.type === "integer" || schema.type === "number") {
     checks.push(`typeof ${value} !== "number"`);
+    if (schema.type === "integer") checks.push(`!Number.isInteger(Number(${value}))`);
+    if (schema.minimum !== undefined) checks.push(`Number(${value}) < ${schema.minimum}`);
+    if (schema.maximum !== undefined) checks.push(`Number(${value}) > ${schema.maximum}`);
   }
   if (schema.type === "boolean") checks.push(`typeof ${value} !== "boolean"`);
   return checks.length === 0 ? "false" : `(${checks.join(" || ")})`;

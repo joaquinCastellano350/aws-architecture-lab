@@ -9,7 +9,7 @@ import {
 
 const template = workloadTemplate();
 
-describe("marketplace checkout walking skeleton", () => {
+describe("marketplace checkout Order and Inventory Saga", () => {
   it("protects both checkout API operations with IAM authorization", () => {
     template.hasResourceProperties("AWS::ApiGateway::RestApi", {
       Body: Match.objectLike({
@@ -33,7 +33,7 @@ describe("marketplace checkout walking skeleton", () => {
   });
 
   it("gives Order and Saga Execution separately owned durable records", () => {
-    template.resourceCountIs("AWS::DynamoDB::Table", 4);
+    template.resourceCountIs("AWS::DynamoDB::Table", 6);
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       KeySchema: [{ AttributeName: "checkoutId", KeyType: "HASH" }],
       SSESpecification: { SSEEnabled: true },
@@ -48,7 +48,7 @@ describe("marketplace checkout walking skeleton", () => {
     });
 
     const tables = Object.values(template.findResources("AWS::DynamoDB::Table"));
-    expect(tables).toHaveLength(4);
+    expect(tables).toHaveLength(6);
     for (const table of tables) {
       expect(table.DeletionPolicy).toBe("Delete");
       expect(table.UpdateReplacePolicy).toBe("Delete");
@@ -115,7 +115,7 @@ describe("marketplace checkout walking skeleton", () => {
       },
     });
     template.resourceCountIs("AWS::StepFunctions::StateMachineVersion", 1);
-    template.resourceCountIs("AWS::Lambda::Version", 1);
+    template.resourceCountIs("AWS::Lambda::Version", 2);
     template.hasResourceProperties("AWS::StepFunctions::StateMachineAlias", {
       Name: "LIVE",
       RoutingConfiguration: [
@@ -138,7 +138,7 @@ describe("marketplace checkout walking skeleton", () => {
 
     for (const resourceType of ["AWS::StepFunctions::StateMachineVersion", "AWS::Lambda::Version"]) {
       const versions = Object.values(template.findResources(resourceType));
-      expect(versions).toHaveLength(1);
+      expect(versions).toHaveLength(resourceType === "AWS::Lambda::Version" ? 2 : 1);
       expect(versions[0]?.UpdateReplacePolicy).toBe("Retain");
       expect(versions[0]?.DeletionPolicy).toBe("Retain");
     }
@@ -148,6 +148,53 @@ describe("marketplace checkout walking skeleton", () => {
     expect(policies).toContain("states:DescribeExecution");
     expect(policies).toContain("lambda:InvokeFunction");
     expect(policies).toContain(":*");
+  });
+
+  it("coordinates Inventory only through typed commands and branches on business outcomes", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      KeySchema: [{ AttributeName: "recordKey", KeyType: "HASH" }],
+      StreamSpecification: Match.absent(),
+    });
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      KeySchema: [{ AttributeName: "eventId", KeyType: "HASH" }],
+      StreamSpecification: { StreamViewType: "NEW_IMAGE" },
+    });
+
+    const functions = Object.values(template.findResources("AWS::Lambda::Function"));
+    expect(functions.some((fn) =>
+      fn.Properties?.Environment?.Variables?.INVENTORY_TABLE_NAME !== undefined &&
+      fn.Properties?.Environment?.Variables?.INVENTORY_OUTBOX_TABLE_NAME !== undefined
+    )).toBe(true);
+    const commandFunctions = functions.filter((fn) =>
+      fn.Properties?.Environment?.Variables?.INVENTORY_TABLE_NAME !== undefined ||
+      fn.Properties?.Environment?.Variables?.ORDER_TABLE_NAME !== undefined &&
+        fn.Properties?.Environment?.Variables?.ORDER_OUTBOX_TABLE_NAME !== undefined
+    );
+    expect(commandFunctions).toHaveLength(2);
+    expect(commandFunctions.every((fn) => fn.Properties?.Timeout === 3)).toBe(true);
+    expect(functions.some((fn) =>
+      fn.Properties?.Environment?.Variables?.EVENT_SOURCE === "aws-architecture-lab.inventory"
+    )).toBe(true);
+
+    const definition = JSON.stringify(
+      Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
+    );
+    expect(definition).toContain("ReserveInventory");
+    expect(definition).toContain("RESERVED");
+    expect(definition).toContain("OUT_OF_STOCK");
+    expect(definition).toContain("CommitInventory");
+    expect(definition).toContain("InventoryCommitted");
+    expect(definition).toContain("MarkOrderInventoryUnavailable");
+    expect(definition).toContain("INVENTORY_UNAVAILABLE");
+    expect(definition).toContain("TransactionConflictException");
+    expect(definition).toContain("JitterStrategy");
+    expect(definition).toContain("FULL");
+
+    const stateMachine = Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0];
+    const stateMachineRoleId = stateMachine?.Properties?.RoleArn?.["Fn::GetAtt"]?.[0];
+    const coordinatorPolicies = Object.values(template.findResources("AWS::IAM::Policy"))
+      .filter((policy) => JSON.stringify(policy.Properties?.Roles).includes(stateMachineRoleId));
+    expect(JSON.stringify(coordinatorPolicies)).not.toContain("dynamodb:");
   });
 
   it("authorizes workflow starts against the state machine and only through LIVE", () => {
@@ -191,7 +238,7 @@ describe("marketplace checkout walking skeleton", () => {
     });
 
     const functions = Object.values(template.findResources("AWS::Lambda::Function"));
-    expect(functions).toHaveLength(4);
+    expect(functions).toHaveLength(6);
     for (const fn of functions) {
       expect(fn.Properties?.ReservedConcurrentExecutions).toBeUndefined();
     }
@@ -203,7 +250,7 @@ describe("marketplace checkout walking skeleton", () => {
       const configuredTemplate = workloadTemplate({ lambdaReservedConcurrency: 3 });
       const functions = Object.values(configuredTemplate.findResources("AWS::Lambda::Function"));
 
-      expect(functions).toHaveLength(4);
+      expect(functions).toHaveLength(6);
       for (const fn of functions) {
         expect(fn.Properties?.ReservedConcurrentExecutions).toBe(3);
       }

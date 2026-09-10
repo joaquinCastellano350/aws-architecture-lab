@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   validateCreatePendingOrderCommand,
   validateCreatePendingOrderOutcome,
+  validateMarkOrderInventoryUnavailableCommand,
+  validateMarkOrderInventoryUnavailableOutcome,
 } from "./generated/order-command.js";
 
 describe("Order command JSON schemas", () => {
@@ -26,6 +28,25 @@ describe("Order command JSON schemas", () => {
       checkoutId: "checkout-from-older-workflow",
       cartId: "cart-123",
       correlationId: "corr-123",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the typed Order outcome for an unavailable Inventory reservation", () => {
+    const command = {
+      schemaVersion: "1.0",
+      commandType: "MarkOrderInventoryUnavailable",
+      operationId: "mark-inventory-unavailable-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    };
+
+    expect(validateMarkOrderInventoryUnavailableCommand(command).ok).toBe(true);
+    expect(validateMarkOrderInventoryUnavailableOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "INVENTORY_UNAVAILABLE",
     }).ok).toBe(true);
   });
 

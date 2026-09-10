@@ -89,7 +89,9 @@
         "properties": {
           "contractVersion": { "type": "string", "enum": ["1.0"] },
           "cartId": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 }
+          "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "itemId": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "quantity": { "type": "integer", "minimum": 1, "maximum": 1000 }
         },
         "additionalProperties": true
       },
@@ -106,7 +108,7 @@
         "required": ["checkoutId", "status", "correlationId", "createdAt", "updatedAt"],
         "properties": {
           "checkoutId": { "type": "string" },
-          "status": { "type": "string", "enum": ["PENDING"] },
+          "status": { "type": "string", "enum": ["PENDING", "INVENTORY_UNAVAILABLE"] },
           "correlationId": { "type": "string" },
           "createdAt": { "type": "string", "format": "date-time" },
           "updatedAt": { "type": "string", "format": "date-time" }

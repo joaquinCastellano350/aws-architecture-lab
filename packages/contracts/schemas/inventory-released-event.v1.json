@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:inventory:released-event:v1",
+  "title": "InventoryReleasedEvent",
+  "type": "object",
+  "required": ["eventId", "eventType", "eventVersion", "occurredAt", "correlationId", "causationId", "aggregateType", "aggregateId", "payload"],
+  "properties": {
+    "eventId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "eventType": { "type": "string", "const": "InventoryReleased" },
+    "eventVersion": { "type": "string", "const": "1.0" },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "causationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "aggregateType": { "type": "string", "const": "InventoryReservation" },
+    "aggregateId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "payload": {
+      "type": "object",
+      "required": ["itemId", "quantity", "status"],
+      "properties": {
+        "itemId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "quantity": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "status": { "type": "string", "const": "RELEASED" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

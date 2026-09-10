@@ -18,6 +18,8 @@ describe("checkout OpenAPI contract", () => {
       contractVersion: "1.0",
       cartId: "cart-123",
       correlationId: "corr-123",
+      itemId: "sku-123",
+      quantity: 2,
       futureField: "ignored by this consumer",
     } as const;
 
@@ -34,6 +36,8 @@ describe("checkout OpenAPI contract", () => {
     { contractVersion: "2.0", cartId: "cart-123", correlationId: "corr-123" },
     { contractVersion: "1.0", cartId: "", correlationId: "corr-123" },
     { contractVersion: "1.0", cartId: "cart-123" },
+    { contractVersion: "1.0", cartId: "cart-123", correlationId: "corr-123", quantity: 0 },
+    { contractVersion: "1.0", cartId: "cart-123", correlationId: "corr-123", itemId: "" },
   ])("rejects malformed submissions without accepting partial data", (request) => {
     expect(validateSubmitCheckoutRequest(request)).toEqual({
       ok: false,
@@ -58,6 +62,13 @@ describe("checkout OpenAPI contract", () => {
       correlationId: "corr-123",
       createdAt: "2026-09-07T12:00:00.000Z",
       updatedAt: "2026-09-07T12:00:00.000Z",
+    }).ok).toBe(true);
+    expect(validateCheckoutStatusResponse({
+      checkoutId: "checkout-123",
+      status: "INVENTORY_UNAVAILABLE",
+      correlationId: "corr-123",
+      createdAt: "2026-09-07T12:00:00.000Z",
+      updatedAt: "2026-09-07T12:00:01.000Z",
     }).ok).toBe(true);
     expect(validateCheckoutStatusResponse({
       checkoutId: "checkout-123",

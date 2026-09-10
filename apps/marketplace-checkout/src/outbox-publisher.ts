@@ -1,7 +1,11 @@
 import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import {
+  validateInventoryEvent,
+  validateOrderInventoryUnavailableEvent,
   validateOrderPendingEvent,
+  type InventoryEvent,
+  type OrderInventoryUnavailableEvent,
   type OrderPendingEvent,
 } from "@aws-architecture-lab/contracts";
 import type {
@@ -18,16 +22,19 @@ export interface OutboxPublisherDependencies {
   readonly eventSource: string;
 }
 
+type DomainEvent = InventoryEvent | OrderInventoryUnavailableEvent | OrderPendingEvent;
+
 export function createOutboxPublisher(dependencies: OutboxPublisherDependencies) {
   return async (input: DynamoDBStreamEvent): Promise<DynamoDBBatchResponse> => {
     const failures = new Set<string>();
-    const publishable: Array<{ readonly itemIdentifier: string; readonly event: OrderPendingEvent }> = [];
+    const publishable: Array<{ readonly itemIdentifier: string; readonly event: DomainEvent }> = [];
 
     for (const record of input.Records) {
       if (record.eventName !== "INSERT") continue;
       const itemIdentifier = record.dynamodb?.SequenceNumber;
       if (itemIdentifier === undefined || record.dynamodb?.NewImage === undefined) continue;
-      const validation = validateOrderPendingEvent(
+      const validation = validateDomainEvent(
+        dependencies.eventSource,
         unmarshall(record.dynamodb.NewImage as Parameters<typeof unmarshall>[0]),
       );
       if (!validation.ok) {
@@ -81,3 +88,15 @@ export const handler: DynamoDBStreamHandler = async (event) => createOutboxPubli
   eventBusName: requiredEnvironment("EVENT_BUS_NAME"),
   eventSource: requiredEnvironment("EVENT_SOURCE"),
 })(event);
+
+function validateDomainEvent(
+  eventSource: string,
+  input: unknown,
+): { readonly ok: true; readonly value: DomainEvent } | { readonly ok: false } {
+  if (eventSource === "aws-architecture-lab.order") {
+    const pending = validateOrderPendingEvent(input);
+    return pending.ok ? pending : validateOrderInventoryUnavailableEvent(input);
+  }
+  if (eventSource === "aws-architecture-lab.inventory") return validateInventoryEvent(input);
+  return { ok: false };
+}

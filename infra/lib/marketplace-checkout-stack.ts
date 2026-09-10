@@ -35,8 +35,12 @@ import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import {
   CfnStateMachineAlias,
   CfnStateMachineVersion,
+  Choice,
+  Condition,
   DefinitionBody,
+  Fail,
   JsonPath,
+  JitterType,
   LogLevel,
   StateMachine,
   StateMachineType,
@@ -49,6 +53,7 @@ import type { Construct } from "constructs";
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const orderEventSource = "aws-architecture-lab.order";
 const orderPendingEventType = "OrderPending";
+const inventoryEventSource = "aws-architecture-lab.inventory";
 
 export interface MarketplaceCheckoutStackProps extends StackProps {
   readonly lambdaReservedConcurrency?: number;
@@ -107,6 +112,23 @@ export class MarketplaceCheckoutStack extends Stack {
       maxWriteRequestUnits: 100,
       removalPolicy: RemovalPolicy.DESTROY,
     });
+    const inventoryTable = new Table(this, "Inventory", {
+      partitionKey: { name: "recordKey", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const inventoryOutboxTable = new Table(this, "InventoryOutbox", {
+      partitionKey: { name: "eventId", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+      stream: StreamViewType.NEW_IMAGE,
+    });
     const eventBus = new EventBus(this, "CheckoutEvents", {
       eventBusName: "aws-architecture-lab-marketplace-checkout",
     });
@@ -131,6 +153,29 @@ export class MarketplaceCheckoutStack extends Stack {
     }));
     eventBus.grantPutEventsTo(outboxPublisher);
 
+    const failedInventoryOutboxRecords = new Queue(this, "InventoryOutboxFailureDestination", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(4),
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const inventoryOutboxPublisher = this.lambdaFunction(
+      "InventoryOutboxPublisher",
+      "outbox-publisher.ts",
+      {
+        EVENT_BUS_NAME: eventBus.eventBusName,
+        EVENT_SOURCE: inventoryEventSource,
+      },
+    );
+    inventoryOutboxPublisher.addEventSource(new DynamoEventSource(inventoryOutboxTable as ITable, {
+      batchSize: 10,
+      bisectBatchOnError: true,
+      onFailure: new SqsDlq(failedInventoryOutboxRecords),
+      reportBatchItemFailures: true,
+      retryAttempts: 3,
+      startingPosition: StartingPosition.LATEST,
+    }));
+    eventBus.grantPutEventsTo(inventoryOutboxPublisher);
+
     const auditConsumer = this.lambdaFunction("OrderAuditConsumer", "audit-consumer.ts", {
       AUDIT_TABLE_NAME: auditTable.tableName,
       EVENT_SOURCE: orderEventSource,
@@ -148,10 +193,15 @@ export class MarketplaceCheckoutStack extends Stack {
       })],
     });
 
-    const orderFunction = this.lambdaFunction("OrderCommand", "order-lambda.ts", {
-      ORDER_TABLE_NAME: orderTable.tableName,
-      ORDER_OUTBOX_TABLE_NAME: orderOutboxTable.tableName,
-    });
+    const orderFunction = this.lambdaFunction(
+      "OrderCommand",
+      "order-lambda.ts",
+      {
+        ORDER_TABLE_NAME: orderTable.tableName,
+        ORDER_OUTBOX_TABLE_NAME: orderOutboxTable.tableName,
+      },
+      Duration.seconds(3),
+    );
     orderTable.grantReadWriteData(orderFunction);
     orderOutboxTable.grantWriteData(orderFunction);
     orderFunction.addToRolePolicy(new PolicyStatement({
@@ -161,6 +211,26 @@ export class MarketplaceCheckoutStack extends Stack {
     const orderFunctionVersion = orderFunction.currentVersion;
     const cfnOrderFunctionVersion = orderFunctionVersion.node.defaultChild as CfnVersion;
     retainAcrossDeployments(cfnOrderFunctionVersion);
+
+    const inventoryFunction = this.lambdaFunction(
+      "InventoryCommand",
+      "inventory-lambda.ts",
+      {
+        INVENTORY_INITIAL_QUANTITY: "100",
+        INVENTORY_OUTBOX_TABLE_NAME: inventoryOutboxTable.tableName,
+        INVENTORY_TABLE_NAME: inventoryTable.tableName,
+      },
+      Duration.seconds(3),
+    );
+    inventoryTable.grantReadWriteData(inventoryFunction);
+    inventoryOutboxTable.grantWriteData(inventoryFunction);
+    inventoryFunction.addToRolePolicy(new PolicyStatement({
+      actions: ["dynamodb:TransactWriteItems"],
+      resources: [inventoryTable.tableArn, inventoryOutboxTable.tableArn],
+    }));
+    const inventoryFunctionVersion = inventoryFunction.currentVersion;
+    const cfnInventoryFunctionVersion = inventoryFunctionVersion.node.defaultChild as CfnVersion;
+    retainAcrossDeployments(cfnInventoryFunctionVersion);
 
     const workflowLogGroup = new LogGroup(this, "CheckoutWorkflowLogs", {
       retention: RetentionDays.ONE_WEEK,
@@ -181,13 +251,89 @@ export class MarketplaceCheckoutStack extends Stack {
       resultPath: "$.order",
       retryOnServiceExceptions: false,
     });
-    createPendingOrder.addRetry({
-      errors: ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
-      interval: Duration.seconds(1),
-      maxAttempts: 2,
-      backoffRate: 2,
+    this.addInternalCommandRetry(createPendingOrder);
+    const reserveInventory = new LambdaInvoke(this, "ReserveInventory", {
+      lambdaFunction: inventoryFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "ReserveInventory",
+        operationId: JsonPath.format("reserve-{}", JsonPath.stringAt("$.checkoutId")),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        reservationId: JsonPath.format("reservation-{}", JsonPath.stringAt("$.checkoutId")),
+        itemId: JsonPath.stringAt("$.itemId"),
+        quantity: JsonPath.numberAt("$.quantity"),
+        expiresAt: JsonPath.stringAt("$.reservationExpiresAt"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.inventoryReservation",
+      retryOnServiceExceptions: false,
     });
-    const workflowDefinition = createPendingOrder.next(new Succeed(this, "PendingOrderRecorded"));
+    this.addInternalCommandRetry(reserveInventory);
+    const commitInventory = new LambdaInvoke(this, "CommitInventory", {
+      lambdaFunction: inventoryFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "CommitInventory",
+        operationId: JsonPath.format("commit-{}", JsonPath.stringAt("$.checkoutId")),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        reservationId: JsonPath.stringAt("$.inventoryReservation.reservationId"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.inventoryCommit",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(commitInventory);
+    const inventoryCommitted = new Succeed(this, "InventoryCommitted");
+    const inventoryUnavailable = new Succeed(this, "InventoryUnavailable");
+    const markOrderInventoryUnavailable = new LambdaInvoke(this, "MarkOrderInventoryUnavailable", {
+      lambdaFunction: orderFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "MarkOrderInventoryUnavailable",
+        operationId: JsonPath.format(
+          "mark-inventory-unavailable-{}",
+          JsonPath.stringAt("$.checkoutId"),
+        ),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.order",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(markOrderInventoryUnavailable);
+    markOrderInventoryUnavailable.next(new Choice(this, "OrderInventoryOutcome")
+      .when(
+        Condition.stringEquals("$.order.status", "INVENTORY_UNAVAILABLE"),
+        inventoryUnavailable,
+      )
+      .otherwise(new Fail(this, "OrderInventoryOutcomeRejected", {
+        cause: "Order returned an unsupported Inventory-unavailable outcome.",
+        error: "OrderInvariantViolation",
+      })));
+    const invalidInventoryCommit = new Fail(this, "InventoryCommitRejected", {
+      cause: "A reserved Inventory record could not be committed.",
+      error: "InventoryInvariantViolation",
+    });
+    commitInventory.next(new Choice(this, "InventoryCommitOutcome")
+      .when(Condition.stringEquals("$.inventoryCommit.status", "COMMITTED"), inventoryCommitted)
+      .otherwise(invalidInventoryCommit));
+    reserveInventory.next(new Choice(this, "InventoryReservationOutcome")
+      .when(Condition.stringEquals("$.inventoryReservation.status", "RESERVED"), commitInventory)
+      .when(
+        Condition.stringEquals("$.inventoryReservation.status", "OUT_OF_STOCK"),
+        markOrderInventoryUnavailable,
+      )
+      .otherwise(new Fail(this, "InventoryReservationRejected", {
+        cause: "Inventory returned an unsupported reservation outcome.",
+        error: "InventoryInvariantViolation",
+      })));
+    const workflowDefinition = createPendingOrder.next(reserveInventory);
     const stateMachine = new StateMachine(this, "CheckoutWorkflow", {
       definitionBody: DefinitionBody.fromChainable(workflowDefinition),
       logs: {
@@ -205,9 +351,15 @@ export class MarketplaceCheckoutStack extends Stack {
         resources: [`${orderFunction.functionArn}:*`],
       }),
     );
+    stateMachine.addToRolePolicy(
+      new PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [`${inventoryFunction.functionArn}:*`],
+      }),
+    );
 
     const workflowVersion = new CfnStateMachineVersion(this, "CheckoutWorkflowVersion", {
-      description: "Immutable marketplace checkout walking-skeleton workflow.",
+      description: "Immutable marketplace checkout Order and Inventory workflow.",
       stateMachineArn: stateMachine.stateMachineArn,
       stateMachineRevisionId: stateMachine.stateMachineRevisionId,
     });
@@ -293,12 +445,15 @@ export class MarketplaceCheckoutStack extends Stack {
     });
     new CfnOutput(this, "OrderEventSource", { value: orderEventSource });
     new CfnOutput(this, "OrderPendingEventType", { value: orderPendingEventType });
+    new CfnOutput(this, "InventoryTableName", { value: inventoryTable.tableName });
+    new CfnOutput(this, "InventoryEventSource", { value: inventoryEventSource });
   }
 
   private lambdaFunction(
     id: string,
     entryFile: string,
     environment: Record<string, string>,
+    timeout: Duration = Duration.seconds(10),
   ): NodejsFunction {
     const functionName = `aws-architecture-lab-${id.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase()}`;
     const logGroup = new LogGroup(this, `${id}Logs`, {
@@ -323,7 +478,26 @@ export class MarketplaceCheckoutStack extends Stack {
       ...(this.lambdaReservedConcurrency === undefined
         ? {}
         : { reservedConcurrentExecutions: this.lambdaReservedConcurrency }),
-      timeout: Duration.seconds(10),
+      timeout,
+    });
+  }
+
+  private addInternalCommandRetry(task: LambdaInvoke): void {
+    task.addRetry({
+      errors: [
+        "Lambda.ServiceException",
+        "Lambda.AWSLambdaException",
+        "Lambda.SdkClientException",
+        "TransactionCanceledException",
+        "TransactionConflictException",
+        "ProvisionedThroughputExceededException",
+        "ThrottlingException",
+        "InternalServerError",
+      ],
+      interval: Duration.seconds(1),
+      maxAttempts: 2,
+      backoffRate: 2,
+      jitterStrategy: JitterType.FULL,
     });
   }
 }

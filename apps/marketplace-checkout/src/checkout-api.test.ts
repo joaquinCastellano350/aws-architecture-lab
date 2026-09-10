@@ -103,21 +103,41 @@ describe("asynchronous checkout API", () => {
       detail: "Request body does not match SubmitCheckoutRequest v1.0",
     });
   });
+
+  it("keeps older v1 submissions compatible with deterministic lab inventory defaults", async () => {
+    const api = checkoutApi({ itemId: "marketplace-demo-item", quantity: 1 });
+
+    const response = await api({
+      httpMethod: "POST",
+      path: "/checkouts",
+      headers: { "Idempotency-Key": "older-client-request" },
+      body: JSON.stringify({
+        contractVersion: "1.0",
+        cartId: "cart-123",
+        correlationId: "corr-123",
+      }),
+    });
+
+    expect(response.statusCode).toBe(202);
+  });
 });
 
 const validRequest = {
   contractVersion: "1.0",
   cartId: "cart-123",
   correlationId: "corr-123",
+  itemId: "sku-123",
+  quantity: 2,
 } as const;
 
-function checkoutApi() {
+function checkoutApi(expectedInventory = { itemId: "sku-123", quantity: 2 }) {
   const persistence = new InMemoryCheckoutPersistence();
   let workflowStarted = false;
   const workflow: WorkflowStarter = {
     async start(input) {
       if (workflowStarted) throw new Error("A durable replay must not start a second workflow");
       workflowStarted = true;
+      expect(input).toEqual(expect.objectContaining(expectedInventory));
       await persistence.createPendingOrder({
         checkoutId: input.checkoutId,
         correlationId: input.correlationId,

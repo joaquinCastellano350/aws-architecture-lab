@@ -4,5 +4,7 @@ export const contractStrategy = {
 } as const;
 
 export * from "./generated/checkout-api.js";
+export * from "./generated/inventory-command.js";
+export * from "./generated/inventory-event.js";
 export * from "./generated/order-command.js";
 export * from "./generated/order-event.js";

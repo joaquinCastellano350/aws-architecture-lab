@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { createOutboxPublisher } from "./outbox-publisher.js";
 
-describe("Order outbox publisher", () => {
+describe("domain outbox publisher", () => {
   it("routes event types through EventBridge and retries only failed stream records", async () => {
     const sent: unknown[] = [];
     const eventBridge = {
@@ -70,6 +70,28 @@ describe("Order outbox publisher", () => {
     });
   });
 
+  it("publishes versioned Inventory facts from the Inventory outbox", async () => {
+    const sent: PutEventsCommand[] = [];
+    const eventBridge = {
+      async send(command: PutEventsCommand) {
+        sent.push(command);
+        return { Entries: [{ EventId: "eventbridge-inventory" }] };
+      },
+    } as unknown as EventBridgeClient;
+    const publish = createOutboxPublisher({
+      eventBridge,
+      eventBusName: "checkout-events",
+      eventSource: "aws-architecture-lab.inventory",
+    });
+
+    await expect(publish({ Records: [streamRecord("inventory-stream", inventoryEvent())] }))
+      .resolves.toEqual({ batchItemFailures: [] });
+    expect(sent[0]?.input.Entries?.[0]).toEqual(expect.objectContaining({
+      Source: "aws-architecture-lab.inventory",
+      DetailType: "InventoryReserved",
+    }));
+  });
+
   it("reports malformed records for retry without publishing them", async () => {
     const eventBridge = {
       async send() {
@@ -114,5 +136,24 @@ function orderPendingEvent(eventId: string, aggregateId: string) {
     aggregateType: "Order",
     aggregateId,
     payload: { status: "PENDING" },
+  };
+}
+
+function inventoryEvent() {
+  return {
+    eventId: "inventory-event-1",
+    eventType: "InventoryReserved",
+    eventVersion: "1.0",
+    occurredAt: "2026-09-09T12:00:00.000Z",
+    correlationId: "corr-checkout-1",
+    causationId: "execution-1",
+    aggregateType: "InventoryReservation",
+    aggregateId: "reservation-1",
+    payload: {
+      itemId: "sku-1",
+      quantity: 1,
+      status: "RESERVED",
+      expiresAt: "2026-09-09T12:05:00.000Z",
+    },
   };
 }

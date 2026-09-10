@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:inventory:command-outcome:v1",
+  "title": "InventoryCommandOutcome",
+  "type": "object",
+  "required": ["schemaVersion", "operationId", "checkoutId", "reservationId", "status"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "reservationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "status": { "type": "string", "enum": ["RESERVED", "COMMITTED", "RELEASED", "OUT_OF_STOCK", "RESERVATION_NOT_ACTIVE"] }
+  },
+  "additionalProperties": true
+}

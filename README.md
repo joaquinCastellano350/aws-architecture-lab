@@ -98,7 +98,9 @@ The first ephemeral workload exposes the OpenAPI-defined `POST /checkouts` and
 `GET /checkouts/{checkoutId}` operations. Both require IAM/SigV4. Submission is
 asynchronous: a successful POST returns `202 Accepted` and a status location while a
 Step Functions Standard execution, admitted through the `LIVE` alias, creates the
-customer-visible pending Order.
+customer-visible pending Order, reserves Inventory without overselling, and commits the
+reservation. Optional additive `itemId` and `quantity` request fields select stock; older
+v1 clients use the deterministic lab item and a quantity of one.
 
 After the foundation has been deployed, use the same preflight environment shown above:
 
@@ -110,8 +112,9 @@ npm run workload:destroy
 ```
 
 The smoke command signs real API requests with the active AWS credentials, repeats the
-POST to prove idempotent admission, and polls GET until the pending Order is visible. It
-then waits for the committed `OrderPending` fact in the audit table, republishes that
+POST to prove idempotent admission, polls GET until the pending Order is visible, and
+verifies that its Inventory reservation reaches `COMMITTED`. It then waits for the
+committed `OrderPending` fact in the audit table, republishes that
 event alongside a distinct event, and proves the audit consumer deduplicates the replay
 without dropping the distinct fact. Destroy removes the ephemeral workload and verifies
 that the foundation stack remains.

@@ -16,12 +16,15 @@ await executeAsyncCli(async () => {
   const auditLogGroupName = stackOutput("OrderAuditConsumerLogGroupName");
   const eventSource = stackOutput("OrderEventSource");
   const orderPendingEventType = stackOutput("OrderPendingEventType");
+  const inventoryTableName = stackOutput("InventoryTableName");
   const idempotencyKey = `smoke-${Date.now()}`;
   const correlationId = `smoke-correlation-${Date.now()}`;
   const requestBody = JSON.stringify({
     contractVersion: "1.0",
     cartId: `smoke-cart-${Date.now()}`,
     correlationId,
+    itemId: `smoke-item-${Date.now()}`,
+    quantity: 1,
   });
 
   const submitted = await signedJsonRequest(apiUrl, report.region, "POST", "/checkouts", {
@@ -65,6 +68,8 @@ await executeAsyncCli(async () => {
   if (status === undefined) {
     throw new Error("Checkout did not expose a PENDING Order within 20 seconds.");
   }
+
+  await waitForCommittedInventory(inventoryTableName, checkoutId, 20_000);
 
   const initialAudit = await waitForAuditedEvent(auditTableName, correlationId, 20_000);
   const eventId = stringAttribute(initialAudit, "eventId");
@@ -117,7 +122,7 @@ await executeAsyncCli(async () => {
   }
 
   console.log(
-    `Smoke passed for ${checkoutId}: POST 202, idempotent replay, GET PENDING, transactional event observed, duplicate deduplicated, distinct event retained.`,
+    `Smoke passed for ${checkoutId}: POST 202, idempotent replay, GET PENDING, Inventory committed, transactional Order event observed, duplicate deduplicated, distinct event retained.`,
   );
 });
 
@@ -271,6 +276,31 @@ function auditItem(tableName: string, eventId: string): Record<string, unknown> 
     JSON.stringify({ eventId: { S: eventId } }),
   ]);
   return isRecord(response) && isRecord(response.Item) ? response.Item : undefined;
+}
+
+async function waitForCommittedInventory(
+  tableName: string,
+  checkoutId: string,
+  timeoutMilliseconds: number,
+): Promise<void> {
+  const reservationId = `reservation-${checkoutId}`;
+  const observed = await pollUntil(timeoutMilliseconds, () => {
+    const response = runAwsJson([
+      "dynamodb",
+      "get-item",
+      "--table-name",
+      tableName,
+      "--consistent-read",
+      "--key",
+      JSON.stringify({ recordKey: { S: `RESERVATION#${reservationId}` } }),
+    ]);
+    if (!isRecord(response) || !isRecord(response.Item)) return undefined;
+    const status = response.Item.status;
+    return isRecord(status) && status.S === "COMMITTED" ? true : undefined;
+  });
+  if (observed === undefined) {
+    throw new Error("Checkout Inventory reservation was not committed within 20 seconds.");
+  }
 }
 
 function stringAttribute(item: Record<string, unknown>, name: string): string {

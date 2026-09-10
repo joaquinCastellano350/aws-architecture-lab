@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { validateOrderPendingEvent } from "./generated/order-event.js";
+import {
+  validateOrderInventoryUnavailableEvent,
+  validateOrderPendingEvent,
+} from "./generated/order-event.js";
 
 describe("Order event JSON schema", () => {
   it("accepts the complete versioned OrderPending envelope", () => {
@@ -28,6 +31,20 @@ describe("Order event JSON schema", () => {
         payload: { status: "PENDING" },
       },
     });
+  });
+
+  it("accepts the customer-visible Inventory-unavailable Order fact", () => {
+    expect(validateOrderInventoryUnavailableEvent({
+      eventId: "event-unavailable",
+      eventType: "OrderInventoryUnavailable",
+      eventVersion: "1.0",
+      occurredAt: "2026-09-09T12:00:00.000Z",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+      aggregateType: "Order",
+      aggregateId: "checkout-123",
+      payload: { status: "INVENTORY_UNAVAILABLE" },
+    }).ok).toBe(true);
   });
 
   it("rejects an incomplete envelope or wrong payload", () => {

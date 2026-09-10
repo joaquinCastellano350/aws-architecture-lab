@@ -34,6 +34,9 @@ export interface Admission {
   readonly checkoutId: string;
   readonly cartId: string;
   readonly correlationId: string;
+  readonly itemId: string;
+  readonly quantity: number;
+  readonly reservationExpiresAt: string;
   readonly createdAt: string;
 }
 
@@ -49,7 +52,7 @@ export interface SagaExecution {
 export interface Order {
   readonly checkoutId: string;
   readonly correlationId: string;
-  readonly status: "PENDING";
+  readonly status: "PENDING" | "INVENTORY_UNAVAILABLE";
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -69,6 +72,9 @@ export interface WorkflowInput {
   readonly checkoutId: string;
   readonly cartId: string;
   readonly correlationId: string;
+  readonly itemId: string;
+  readonly quantity: number;
+  readonly reservationExpiresAt: string;
 }
 
 export interface WorkflowStarter {
@@ -109,13 +115,19 @@ export class CheckoutApplication {
     request: SubmitCheckoutRequest,
   ): Promise<SubmissionResult> {
     const payloadHash = stableHash(request);
+    const itemId = request.itemId ?? "marketplace-demo-item";
+    const quantity = request.quantity ?? 1;
     const now = this.#clock().toISOString();
+    const reservationExpiresAt = new Date(Date.parse(now) + 5 * 60 * 1000).toISOString();
     const proposed: Admission = {
       idempotencyKey,
       payloadHash,
       checkoutId: this.#checkoutId(),
       cartId: request.cartId,
       correlationId: request.correlationId,
+      itemId,
+      quantity,
+      reservationExpiresAt,
       createdAt: now,
     };
     const admitted = await this.#persistence.admit(proposed, {
@@ -132,6 +144,9 @@ export class CheckoutApplication {
         checkoutId: admitted.admission.checkoutId,
         cartId: admitted.admission.cartId,
         correlationId: admitted.admission.correlationId,
+        itemId: admitted.admission.itemId,
+        quantity: admitted.admission.quantity,
+        reservationExpiresAt: admitted.admission.reservationExpiresAt,
       });
       await this.#persistence.markWorkflowStarted(admitted.admission.checkoutId, execution);
     }
