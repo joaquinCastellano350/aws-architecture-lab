@@ -35,6 +35,24 @@ export interface MarkOrderInventoryUnavailableOutcome {
   readonly [key: string]: unknown;
 }
 
+export interface MarkOrderExpiredCommand {
+  readonly schemaVersion: "1.0";
+  readonly commandType: "MarkOrderExpired";
+  readonly operationId: string;
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly causationId: string;
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderExpiredOutcome {
+  readonly schemaVersion: "1.0";
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly status: "EXPIRED";
+  readonly [key: string]: unknown;
+}
+
 export type OrderContractValidationResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: string };
@@ -104,5 +122,39 @@ export function validateMarkOrderInventoryUnavailableOutcome(
     return { ok: false, error: "Value does not match MarkOrderInventoryUnavailableOutcome" };
   }
   return { ok: true, value: input as MarkOrderInventoryUnavailableOutcome };
+}
+
+export function validateMarkOrderExpiredCommand(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderExpiredCommand> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["commandType"] !== "string" || (input as Record<string, unknown>)["commandType"] !== "MarkOrderExpired") ||
+    (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256)
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderExpiredCommand" };
+  }
+  return { ok: true, value: input as MarkOrderExpiredCommand };
+}
+
+export function validateMarkOrderExpiredOutcome(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderExpiredOutcome> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || (input as Record<string, unknown>)["status"] !== "EXPIRED")
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderExpiredOutcome" };
+  }
+  return { ok: true, value: input as MarkOrderExpiredOutcome };
 }
 

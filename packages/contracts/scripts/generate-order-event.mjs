@@ -5,6 +5,7 @@ import { interfaceLines, objectValidatorLines } from "./schema-codegen.mjs";
 const definitions = await Promise.all([
   load("order-pending-event.v1.json", "validateOrderPendingEvent"),
   load("order-inventory-unavailable-event.v1.json", "validateOrderInventoryUnavailableEvent"),
+  load("order-expired-event.v1.json", "validateOrderExpiredEvent"),
 ]);
 const lines = [
   "// Generated from schemas/order-*-event.v1.json. Do not edit by hand.",

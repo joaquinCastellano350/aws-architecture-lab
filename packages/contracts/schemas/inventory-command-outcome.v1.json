@@ -9,7 +9,8 @@
     "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
     "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
     "reservationId": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "status": { "type": "string", "enum": ["RESERVED", "COMMITTED", "RELEASED", "OUT_OF_STOCK", "RESERVATION_NOT_ACTIVE"] }
+    "status": { "type": "string", "enum": ["RESERVED", "COMMITTED", "RELEASED", "OUT_OF_STOCK", "RESERVATION_NOT_ACTIVE"] },
+    "reservationStatus": { "type": "string", "enum": ["RESERVED", "COMMITTED", "RELEASED"] }
   },
   "additionalProperties": true
 }

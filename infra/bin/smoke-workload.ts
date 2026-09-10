@@ -6,7 +6,7 @@ import { SignatureV4 } from "@smithy/signature-v4";
 
 import { isRecord, runAwsJson } from "../lib/aws-cli.js";
 import { executeAsyncCli, runEnvironmentPreflight } from "../lib/cli.js";
-import { MARKETPLACE_CHECKOUT_STACK_NAME } from "../lib/foundation-config.js";
+import { dynamoStringAttribute, pollUntil, stackOutput } from "../lib/workload-evidence.js";
 
 await executeAsyncCli(async () => {
   const report = runEnvironmentPreflight();
@@ -181,29 +181,6 @@ async function signedJsonRequest(
   return { status: response.status, body: responseBody };
 }
 
-function stackOutput(outputKey: string): string {
-  const response = runAwsJson([
-    "cloudformation",
-    "describe-stacks",
-    "--stack-name",
-    MARKETPLACE_CHECKOUT_STACK_NAME,
-  ]);
-  if (!isRecord(response) || !Array.isArray(response.Stacks)) {
-    throw new Error("CloudFormation returned an unexpected stack response.");
-  }
-  const stack = response.Stacks[0];
-  if (!isRecord(stack) || !Array.isArray(stack.Outputs)) {
-    throw new Error(`${MARKETPLACE_CHECKOUT_STACK_NAME} has no outputs.`);
-  }
-  const output = stack.Outputs.find(
-    (candidate) => isRecord(candidate) && candidate.OutputKey === outputKey,
-  );
-  if (!isRecord(output) || typeof output.OutputValue !== "string") {
-    throw new Error(`${MARKETPLACE_CHECKOUT_STACK_NAME} output ${outputKey} is missing.`);
-  }
-  return output.OutputValue;
-}
-
 async function waitForAuditedEvent(
   tableName: string,
   correlationId: string,
@@ -304,22 +281,9 @@ async function waitForCommittedInventory(
 }
 
 function stringAttribute(item: Record<string, unknown>, name: string): string {
-  const attribute = item[name];
-  if (!isRecord(attribute) || typeof attribute.S !== "string") {
+  const value = dynamoStringAttribute(item, name);
+  if (value === undefined) {
     throw new Error(`Audit event is missing string attribute ${name}.`);
   }
-  return attribute.S;
-}
-
-async function pollUntil<T>(
-  timeoutMilliseconds: number,
-  probe: () => T | undefined | Promise<T | undefined>,
-): Promise<T | undefined> {
-  const deadline = Date.now() + timeoutMilliseconds;
-  while (Date.now() < deadline) {
-    const result = await probe();
-    if (result !== undefined) return result;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  return undefined;
+  return value;
 }

@@ -9,6 +9,7 @@
     "deploy:foundation": "npm run build && node dist/bin/deploy-foundation.js",
     "deploy:workload": "npm run build && node dist/bin/deploy-workload.js",
     "destroy:workload": "npm run build && node dist/bin/destroy-workload.js",
+    "expiry:workload": "npm run build && node dist/bin/expiry-workload.js",
     "preflight": "npm run build && node dist/bin/preflight.js",
     "smoke:workload": "npm run build && node dist/bin/smoke-workload.js",
     "test": "vitest run",

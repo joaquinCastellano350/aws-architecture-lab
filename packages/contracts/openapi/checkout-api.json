@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Marketplace Checkout API",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "paths": {
     "/checkouts": {
@@ -108,7 +108,7 @@
         "required": ["checkoutId", "status", "correlationId", "createdAt", "updatedAt"],
         "properties": {
           "checkoutId": { "type": "string" },
-          "status": { "type": "string", "enum": ["PENDING", "INVENTORY_UNAVAILABLE"] },
+          "status": { "type": "string", "enum": ["PENDING", "INVENTORY_UNAVAILABLE", "EXPIRED"] },
           "correlationId": { "type": "string" },
           "createdAt": { "type": "string", "format": "date-time" },
           "updatedAt": { "type": "string", "format": "date-time" }

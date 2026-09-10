@@ -22,6 +22,8 @@ describe("Inventory event JSON schema", () => {
         quantity: 1,
         status,
         ...(status === "RESERVED" ? { expiresAt: "2026-09-09T12:05:00.000Z" } : {}),
+        ...(status === "RELEASED" ? { releaseReason: "CHECKOUT_EXPIRED" } : {}),
+        ...(status === "RELEASED" ? { checkoutId: "checkout-123" } : {}),
       },
     }).ok).toBe(true);
   });
@@ -49,5 +51,19 @@ describe("Inventory event JSON schema", () => {
       aggregateId: "reservation-123",
       payload: { itemId: "sku-123", quantity: 1, status: "RELEASED" },
     }).ok).toBe(false);
+  });
+
+  it("continues to accept InventoryReleased facts from the earlier v1 producer", () => {
+    expect(validateInventoryEvent({
+      eventId: "event-old-release",
+      eventType: "InventoryReleased",
+      eventVersion: "1.0",
+      occurredAt: "2026-09-09T12:00:00.000Z",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+      aggregateType: "InventoryReservation",
+      aggregateId: "reservation-123",
+      payload: { itemId: "sku-123", quantity: 1, status: "RELEASED" },
+    }).ok).toBe(true);
   });
 });

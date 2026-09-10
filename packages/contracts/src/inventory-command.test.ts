@@ -22,7 +22,10 @@ describe("Inventory command JSON schemas", () => {
       causationId: "execution-123",
     }).ok).toBe(true);
     expect(validateCommitInventoryCommand(transitionCommand("commit-checkout-123")).ok).toBe(true);
-    expect(validateReleaseInventoryCommand(transitionCommand("release-checkout-123")).ok).toBe(true);
+    expect(validateReleaseInventoryCommand({
+      ...transitionCommand("release-checkout-123"),
+      releaseReason: "CHECKOUT_EXPIRED",
+    }).ok).toBe(true);
   });
 
   it("accepts every typed business outcome", () => {
@@ -41,6 +44,14 @@ describe("Inventory command JSON schemas", () => {
         status,
       }).ok).toBe(true);
     }
+    expect(validateInventoryCommandOutcome({
+      schemaVersion: "1.0",
+      operationId: "release-checkout-123",
+      checkoutId: "checkout-123",
+      reservationId: "reservation-checkout-123",
+      status: "RESERVATION_NOT_ACTIVE",
+      reservationStatus: "COMMITTED",
+    }).ok).toBe(true);
   });
 
   it("rejects invalid quantities, dates, versions, and incomplete outcomes", () => {
@@ -61,6 +72,16 @@ describe("Inventory command JSON schemas", () => {
       schemaVersion: "2.0",
     }).ok).toBe(false);
     expect(validateInventoryCommandOutcome({ status: "RESERVED" }).ok).toBe(false);
+    expect(validateInventoryCommandOutcome({
+      schemaVersion: "1.0",
+      operationId: "release-checkout-123",
+      checkoutId: "checkout-123",
+      reservationId: "reservation-checkout-123",
+      status: "RESERVATION_NOT_ACTIVE",
+      reservationStatus: "UNKNOWN",
+    }).ok).toBe(false);
+    expect(validateReleaseInventoryCommand(transitionCommand("release-from-v1-workflow")).ok)
+      .toBe(true);
   });
 });
 

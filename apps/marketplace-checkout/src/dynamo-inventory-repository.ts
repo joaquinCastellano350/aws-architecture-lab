@@ -5,6 +5,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
+  QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -26,6 +27,7 @@ export interface InventoryRepositoryDependencies {
   readonly client?: DynamoDBDocumentClient;
   readonly clock?: () => Date;
   readonly eventId?: () => string;
+  readonly expiryIndexName?: string;
   readonly initialQuantity?: number;
 }
 
@@ -40,11 +42,12 @@ interface InventoryOperation {
   readonly updatedAt: string;
 }
 
-interface InventoryReservation {
+export interface InventoryReservation {
   readonly recordKey: string;
   readonly recordType: "RESERVATION";
   readonly reservationId: string;
   readonly checkoutId: string;
+  readonly correlationId: string;
   readonly itemId: string;
   readonly quantity: number;
   readonly status: "RESERVED" | "COMMITTED" | "RELEASED";
@@ -57,6 +60,7 @@ export class DynamoInventoryRepository {
   readonly #client: DynamoDBDocumentClient;
   readonly #clock: () => Date;
   readonly #eventId: () => string;
+  readonly #expiryIndexName: string;
   readonly #initialQuantity: number;
   readonly #inventoryTableName: string;
   readonly #outboxTableName: string;
@@ -77,6 +81,7 @@ export class DynamoInventoryRepository {
     });
     this.#clock = dependencies.clock ?? (() => new Date());
     this.#eventId = dependencies.eventId ?? randomUUID;
+    this.#expiryIndexName = dependencies.expiryIndexName ?? "ReservationExpiryIndex";
     this.#initialQuantity = initialQuantity;
   }
 
@@ -95,6 +100,28 @@ export class DynamoInventoryRepository {
     }
   }
 
+  public async findExpiredReservations(
+    cutoff: string,
+    limit: number,
+  ): Promise<readonly InventoryReservation[]> {
+    if (Number.isNaN(Date.parse(cutoff))) {
+      throw new Error("cutoff must be an ISO date-time");
+    }
+    const normalizedCutoff = new Date(cutoff).toISOString();
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("limit must be an integer from 1 through 100");
+    }
+    const result = await this.#client.send(new QueryCommand({
+      TableName: this.#inventoryTableName,
+      IndexName: this.#expiryIndexName,
+      KeyConditionExpression: "#status = :reserved AND expiresAt <= :cutoff",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":reserved": "RESERVED", ":cutoff": normalizedCutoff },
+      Limit: limit,
+    }));
+    return (result.Items ?? []) as InventoryReservation[];
+  }
+
   async #reserve(
     command: ReserveInventoryCommand,
     payloadHash: string,
@@ -106,10 +133,11 @@ export class DynamoInventoryRepository {
       recordType: "RESERVATION",
       reservationId: command.reservationId,
       checkoutId: command.checkoutId,
+      correlationId: command.correlationId,
       itemId: command.itemId,
       quantity: command.quantity,
       status: "RESERVED",
-      expiresAt: command.expiresAt,
+      expiresAt: new Date(command.expiresAt).toISOString(),
       createdAt: now,
       updatedAt: now,
     };
@@ -155,6 +183,7 @@ export class DynamoInventoryRepository {
           payloadHash,
           "RESERVATION_NOT_ACTIVE",
           now,
+          reservationConflict.status,
         );
       }
       return this.#recordFailure(command, payloadHash, "OUT_OF_STOCK", now);
@@ -171,19 +200,51 @@ export class DynamoInventoryRepository {
     if (reservation === undefined || reservation.checkoutId !== command.checkoutId) {
       return this.#recordFailure(command, payloadHash, "RESERVATION_NOT_ACTIVE", now);
     }
+    const releaseReason = command.commandType === "ReleaseInventory"
+      ? command.releaseReason ?? "COMPENSATION"
+      : undefined;
+    const expiredRelease = releaseReason === "CHECKOUT_EXPIRED";
+    if (target === "COMMITTED" && Date.parse(reservation.expiresAt) <= Date.parse(now)) {
+      return this.#recordFailure(
+        command,
+        payloadHash,
+        "RESERVATION_NOT_ACTIVE",
+        now,
+        reservation.status,
+      );
+    }
+    if (expiredRelease && Date.parse(reservation.expiresAt) > Date.parse(now)) {
+      return this.#recordFailure(
+        command,
+        payloadHash,
+        "RESERVATION_NOT_ACTIVE",
+        now,
+        reservation.status,
+      );
+    }
     const outcome = inventoryOutcome(command, target);
     const transaction = [
       {
         Update: {
           TableName: this.#inventoryTableName,
           Key: { recordKey: reservation.recordKey },
-          UpdateExpression: "SET #status = :status, updatedAt = :updatedAt",
-          ConditionExpression: "#status = :reserved",
+          UpdateExpression: expiredRelease
+            ? "SET #status = :status, updatedAt = :updatedAt, cleanupAtEpochSeconds = :cleanupAtEpochSeconds"
+            : "SET #status = :status, updatedAt = :updatedAt",
+          ConditionExpression: target === "COMMITTED"
+            ? "#status = :reserved AND expiresAt > :now"
+            : expiredRelease
+              ? "#status = :reserved AND expiresAt <= :now"
+              : "#status = :reserved",
           ExpressionAttributeNames: { "#status": "status" },
           ExpressionAttributeValues: {
             ":reserved": "RESERVED",
             ":status": target,
             ":updatedAt": now,
+            ...(target === "COMMITTED" || expiredRelease ? { ":now": now } : {}),
+            ...(expiredRelease
+              ? { ":cleanupAtEpochSeconds": Math.floor(Date.parse(now) / 1000) + 7 * 24 * 60 * 60 }
+              : {}),
           },
         },
       },
@@ -201,8 +262,12 @@ export class DynamoInventoryRepository {
       }] : []),
       completeOperation(this.#inventoryTableName, command.operationId, payloadHash, outcome, "SUCCEEDED", now),
       putEvent(this.#outboxTableName, inventoryEvent(command, target, now, this.#eventId(), {
+        checkoutId: command.checkoutId,
         itemId: reservation.itemId,
         quantity: reservation.quantity,
+        ...(releaseReason === undefined
+          ? {}
+          : { releaseReason }),
       })),
     ];
     try {
@@ -215,7 +280,27 @@ export class DynamoInventoryRepository {
         return recordedOutcome(replay, payloadHash);
       }
       if (!hasConditionalFailureAt(error, 0)) throw error;
-      return this.#recordFailure(command, payloadHash, "RESERVATION_NOT_ACTIVE", now);
+      const latestReservation = await this.#reservation(command.reservationId);
+      if (
+        target === "COMMITTED" &&
+        latestReservation?.status === "RESERVED" &&
+        Date.parse(latestReservation.expiresAt) <= Date.parse(now)
+      ) {
+        return this.#recordFailure(
+          command,
+          payloadHash,
+          "RESERVATION_NOT_ACTIVE",
+          now,
+          latestReservation.status,
+        );
+      }
+      return this.#recordFailure(
+        command,
+        payloadHash,
+        "RESERVATION_NOT_ACTIVE",
+        now,
+        latestReservation?.status,
+      );
     }
   }
 
@@ -224,8 +309,12 @@ export class DynamoInventoryRepository {
     payloadHash: string,
     status: "OUT_OF_STOCK" | "RESERVATION_NOT_ACTIVE",
     now: string,
+    reservationStatus?: InventoryReservation["status"],
   ): Promise<InventoryCommandOutcome> {
-    const outcome = inventoryOutcome(command, status);
+    const outcome: InventoryCommandOutcome = {
+      ...inventoryOutcome(command, status),
+      ...(reservationStatus === undefined ? {} : { reservationStatus }),
+    };
     try {
       await this.#client.send(new UpdateCommand({
         TableName: this.#inventoryTableName,

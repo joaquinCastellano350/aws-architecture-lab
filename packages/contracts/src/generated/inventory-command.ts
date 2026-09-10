@@ -31,6 +31,7 @@ export interface ReleaseInventoryCommand {
   readonly operationId: string;
   readonly checkoutId: string;
   readonly reservationId: string;
+  readonly releaseReason?: "CHECKOUT_EXPIRED" | "COMPENSATION";
   readonly correlationId: string;
   readonly causationId: string;
   readonly [key: string]: unknown;
@@ -42,6 +43,7 @@ export interface InventoryCommandOutcome {
   readonly checkoutId: string;
   readonly reservationId: string;
   readonly status: "RESERVED" | "COMMITTED" | "RELEASED" | "OUT_OF_STOCK" | "RESERVATION_NOT_ACTIVE";
+  readonly reservationStatus?: "RESERVED" | "COMMITTED" | "RELEASED";
   readonly [key: string]: unknown;
 }
 
@@ -101,6 +103,7 @@ export function validateReleaseInventoryCommand(
     (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
     (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
     (typeof (input as Record<string, unknown>)["reservationId"] !== "string" || String((input as Record<string, unknown>)["reservationId"]).length < 1 || String((input as Record<string, unknown>)["reservationId"]).length > 256) ||
+    ((input as Record<string, unknown>)["releaseReason"] !== undefined && (typeof (input as Record<string, unknown>)["releaseReason"] !== "string" || !["CHECKOUT_EXPIRED", "COMPENSATION"].includes((input as Record<string, unknown>)["releaseReason"] as string))) ||
     (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
     (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256)
   ) {
@@ -119,7 +122,8 @@ export function validateInventoryCommandOutcome(
     (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
     (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
     (typeof (input as Record<string, unknown>)["reservationId"] !== "string" || String((input as Record<string, unknown>)["reservationId"]).length < 1 || String((input as Record<string, unknown>)["reservationId"]).length > 256) ||
-    (typeof (input as Record<string, unknown>)["status"] !== "string" || !["RESERVED", "COMMITTED", "RELEASED", "OUT_OF_STOCK", "RESERVATION_NOT_ACTIVE"].includes((input as Record<string, unknown>)["status"] as string))
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || !["RESERVED", "COMMITTED", "RELEASED", "OUT_OF_STOCK", "RESERVATION_NOT_ACTIVE"].includes((input as Record<string, unknown>)["status"] as string)) ||
+    ((input as Record<string, unknown>)["reservationStatus"] !== undefined && (typeof (input as Record<string, unknown>)["reservationStatus"] !== "string" || !["RESERVED", "COMMITTED", "RELEASED"].includes((input as Record<string, unknown>)["reservationStatus"] as string)))
   ) {
     return { ok: false, error: "Value does not match InventoryCommandOutcome" };
   }

@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createPendingOrder,
+  markOrderExpired,
   markOrderInventoryUnavailable,
 } from "./dynamo-order-repository.js";
 
@@ -135,6 +136,69 @@ describe("Order persistence", () => {
             eventId: "event-unavailable",
             eventType: "OrderInventoryUnavailable",
             payload: { status: "INVENTORY_UNAVAILABLE" },
+          }),
+        }),
+      },
+    ]);
+  });
+
+  it("records a truthful expired Order and immutable fact atomically", async () => {
+    const sent: unknown[] = [];
+    const client = {
+      async send(command: unknown) {
+        sent.push(command);
+        return {};
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    const order = await markOrderExpired(
+      "orders",
+      "order-outbox",
+      {
+        schemaVersion: "1.0",
+        commandType: "MarkOrderExpired",
+        operationId: "expire-order-checkout-123",
+        checkoutId: "checkout-123",
+        correlationId: "corr-123",
+        causationId: "inventory-released-event-123",
+      },
+      {
+        client,
+        clock: () => new Date("2026-09-09T12:05:00.000Z"),
+        eventId: () => "event-expired",
+      },
+    );
+
+    expect(order.status).toBe("EXPIRED");
+    const transaction = sent.find(
+      (command): command is TransactWriteCommand => command instanceof TransactWriteCommand,
+    );
+    expect(transaction?.input.TransactItems).toEqual([
+      {
+        Update: expect.objectContaining({
+          TableName: "orders",
+          Key: { checkoutId: "checkout-123" },
+          ConditionExpression: "#status = :pending AND correlationId = :correlationId",
+        }),
+      },
+      {
+        Put: expect.objectContaining({
+          TableName: "orders",
+          Item: expect.objectContaining({
+            recordType: "OPERATION",
+            operationId: "expire-order-checkout-123",
+            state: "SUCCEEDED",
+            result: order,
+          }),
+        }),
+      },
+      {
+        Put: expect.objectContaining({
+          TableName: "order-outbox",
+          Item: expect.objectContaining({
+            eventId: "event-expired",
+            eventType: "OrderExpired",
+            payload: { status: "EXPIRED" },
           }),
         }),
       },

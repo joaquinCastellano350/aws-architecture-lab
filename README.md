@@ -102,12 +102,23 @@ customer-visible pending Order, reserves Inventory without overselling, and comm
 reservation. Optional additive `itemId` and `quantity` request fields select stock; older
 v1 clients use the deterministic lab item and a quantity of one.
 
+The OpenAPI 2.0 contract adds the `EXPIRED` customer outcome while continuing to accept the
+existing v1 submission schema. Reservations carry a five-minute business deadline. The
+workflow releases a reservation that reaches the deadline before commit and exposes the
+Order as `EXPIRED`. A one-minute
+reconciliation schedule queries the reservation-expiry index and releases abandoned
+reservations idempotently; DynamoDB TTL is assigned only after expiry release and is used
+solely for eventual storage cleanup. The resulting `InventoryReleased` fact independently
+repairs a still-pending Order, so a worker failure between bounded contexts cannot leave the
+customer-visible state permanently stale.
+
 After the foundation has been deployed, use the same preflight environment shown above:
 
 ```shell
 npm run workload:synth
 npm run workload:deploy
 npm run workload:smoke
+npm run workload:expiry
 npm run workload:destroy
 ```
 
@@ -118,3 +129,8 @@ committed `OrderPending` fact in the audit table, republishes that
 event alongside a distinct event, and proves the audit consumer deduplicates the replay
 without dropping the distinct fact. Destroy removes the ephemeral workload and verifies
 that the foundation stack remains.
+
+`workload:expiry` runs the deployed expiry evidence suite. It covers the workflow deadline,
+an abandoned reservation, duplicate sweeps, duplicate release delivery, and a real DynamoDB
+commit-versus-expiry race. It uses four uniquely named checkouts and requires
+`CHECKOUT_REQUEST_CEILING` to be at least `4`.

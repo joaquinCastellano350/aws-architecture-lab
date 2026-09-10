@@ -17,9 +17,11 @@
       "type": "object",
       "required": ["itemId", "quantity", "status"],
       "properties": {
+        "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
         "itemId": { "type": "string", "minLength": 1, "maxLength": 128 },
         "quantity": { "type": "integer", "minimum": 1, "maximum": 1000 },
-        "status": { "type": "string", "const": "RELEASED" }
+        "status": { "type": "string", "const": "RELEASED" },
+        "releaseReason": { "type": "string", "enum": ["CHECKOUT_EXPIRED", "COMPENSATION"] }
       },
       "additionalProperties": true
     }

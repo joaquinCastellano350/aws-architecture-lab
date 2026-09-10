@@ -19,12 +19,13 @@ import { Dashboard, GraphWidget } from "aws-cdk-lib/aws-cloudwatch";
 import {
   AttributeType,
   BillingMode,
+  ProjectionType,
   StreamViewType,
   Table,
   TableEncryption,
   type ITable,
 } from "aws-cdk-lib/aws-dynamodb";
-import { EventBus, Rule } from "aws-cdk-lib/aws-events";
+import { EventBus, Rule, Schedule } from "aws-cdk-lib/aws-events";
 import { LambdaFunction as EventBridgeLambdaFunction } from "aws-cdk-lib/aws-events-targets";
 import { PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import { CfnVersion, Runtime, StartingPosition, type IFunction } from "aws-cdk-lib/aws-lambda";
@@ -46,6 +47,8 @@ import {
   StateMachineType,
   Succeed,
   TaskInput,
+  Wait,
+  WaitTime,
 } from "aws-cdk-lib/aws-stepfunctions";
 import { LambdaInvoke } from "aws-cdk-lib/aws-stepfunctions-tasks";
 import type { Construct } from "constructs";
@@ -119,6 +122,14 @@ export class MarketplaceCheckoutStack extends Stack {
       maxReadRequestUnits: 100,
       maxWriteRequestUnits: 100,
       removalPolicy: RemovalPolicy.DESTROY,
+      timeToLiveAttribute: "cleanupAtEpochSeconds",
+    });
+    const inventoryExpiryIndexName = "ReservationExpiryIndex";
+    inventoryTable.addGlobalSecondaryIndex({
+      indexName: inventoryExpiryIndexName,
+      partitionKey: { name: "status", type: AttributeType.STRING },
+      sortKey: { name: "expiresAt", type: AttributeType.STRING },
+      projectionType: ProjectionType.ALL,
     });
     const inventoryOutboxTable = new Table(this, "InventoryOutbox", {
       partitionKey: { name: "eventId", type: AttributeType.STRING },
@@ -232,6 +243,72 @@ export class MarketplaceCheckoutStack extends Stack {
     const cfnInventoryFunctionVersion = inventoryFunctionVersion.node.defaultChild as CfnVersion;
     retainAcrossDeployments(cfnInventoryFunctionVersion);
 
+    const inventoryExpiryWorker = this.lambdaFunction(
+      "InventoryExpiryWorker",
+      "inventory-expiry-lambda.ts",
+      {
+        INVENTORY_EXPIRY_BATCH_LIMIT: "25",
+        INVENTORY_EXPIRY_INDEX_NAME: inventoryExpiryIndexName,
+        INVENTORY_OUTBOX_TABLE_NAME: inventoryOutboxTable.tableName,
+        INVENTORY_TABLE_NAME: inventoryTable.tableName,
+      },
+      Duration.seconds(10),
+    );
+    inventoryOutboxTable.grantWriteData(inventoryExpiryWorker);
+    inventoryExpiryWorker.addToRolePolicy(new PolicyStatement({
+      actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
+      resources: [inventoryTable.tableArn],
+    }));
+    inventoryExpiryWorker.addToRolePolicy(new PolicyStatement({
+      actions: ["dynamodb:Query"],
+      resources: [`${inventoryTable.tableArn}/index/${inventoryExpiryIndexName}`],
+    }));
+    inventoryExpiryWorker.addToRolePolicy(new PolicyStatement({
+      actions: ["dynamodb:TransactWriteItems"],
+      resources: [inventoryTable.tableArn, inventoryOutboxTable.tableArn],
+    }));
+    new Rule(this, "InventoryExpirySchedule", {
+      schedule: Schedule.rate(Duration.minutes(1)),
+      targets: [new EventBridgeLambdaFunction(inventoryExpiryWorker, {
+        maxEventAge: Duration.minutes(5),
+        retryAttempts: 2,
+      })],
+    });
+
+    const orderExpiryConsumer = this.lambdaFunction(
+      "OrderExpiryConsumer",
+      "order-expiry-consumer.ts",
+      {
+        EVENT_SOURCE: inventoryEventSource,
+        ORDER_OUTBOX_TABLE_NAME: orderOutboxTable.tableName,
+        ORDER_TABLE_NAME: orderTable.tableName,
+      },
+    );
+    orderTable.grantReadWriteData(orderExpiryConsumer);
+    orderOutboxTable.grantWriteData(orderExpiryConsumer);
+    orderExpiryConsumer.addToRolePolicy(new PolicyStatement({
+      actions: ["dynamodb:TransactWriteItems"],
+      resources: [orderTable.tableArn, orderOutboxTable.tableArn],
+    }));
+    const failedOrderExpiryEvents = new Queue(this, "OrderExpiryFailureDestination", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(4),
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    new Rule(this, "ExpiredInventoryReleaseRule", {
+      eventBus,
+      eventPattern: {
+        source: [inventoryEventSource],
+        detailType: ["InventoryReleased"],
+        detail: { payload: { releaseReason: ["CHECKOUT_EXPIRED"] } },
+      },
+      targets: [new EventBridgeLambdaFunction(orderExpiryConsumer, {
+        deadLetterQueue: failedOrderExpiryEvents,
+        maxEventAge: Duration.minutes(5),
+        retryAttempts: 2,
+      })],
+    });
+
     const workflowLogGroup = new LogGroup(this, "CheckoutWorkflowLogs", {
       retention: RetentionDays.ONE_WEEK,
       removalPolicy: RemovalPolicy.DESTROY,
@@ -287,6 +364,23 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(commitInventory);
+    const releaseExpiredInventory = new LambdaInvoke(this, "ReleaseExpiredInventory", {
+      lambdaFunction: inventoryFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "ReleaseInventory",
+        operationId: JsonPath.format("expire-workflow-{}", JsonPath.stringAt("$.inventoryReservation.reservationId")),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        reservationId: JsonPath.stringAt("$.inventoryReservation.reservationId"),
+        releaseReason: "CHECKOUT_EXPIRED",
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.inventoryRelease",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(releaseExpiredInventory);
     const inventoryCommitted = new Succeed(this, "InventoryCommitted");
     const inventoryUnavailable = new Succeed(this, "InventoryUnavailable");
     const markOrderInventoryUnavailable = new LambdaInvoke(this, "MarkOrderInventoryUnavailable", {
@@ -307,6 +401,42 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(markOrderInventoryUnavailable);
+    const markOrderExpired = new LambdaInvoke(this, "MarkOrderExpired", {
+      lambdaFunction: orderFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "MarkOrderExpired",
+        operationId: JsonPath.format("expire-order-workflow-{}", JsonPath.stringAt("$.inventoryReservation.reservationId")),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.order",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(markOrderExpired);
+    const orderExpired = new Succeed(this, "OrderExpired");
+    markOrderExpired.next(new Choice(this, "OrderExpiryOutcome")
+      .when(Condition.stringEquals("$.order.status", "EXPIRED"), orderExpired)
+      .otherwise(new Fail(this, "OrderExpiryOutcomeRejected", {
+        cause: "Order returned an unsupported expiry outcome.",
+        error: "OrderInvariantViolation",
+      })));
+    releaseExpiredInventory.next(new Choice(this, "ExpiredInventoryReleaseOutcome")
+      .when(Condition.stringEquals("$.inventoryRelease.status", "RELEASED"), markOrderExpired)
+      .when(Condition.and(
+        Condition.stringEquals("$.inventoryRelease.status", "RESERVATION_NOT_ACTIVE"),
+        Condition.stringEquals("$.inventoryRelease.reservationStatus", "RELEASED"),
+      ), markOrderExpired)
+      .when(Condition.and(
+        Condition.stringEquals("$.inventoryRelease.status", "RESERVATION_NOT_ACTIVE"),
+        Condition.stringEquals("$.inventoryRelease.reservationStatus", "COMMITTED"),
+      ), inventoryCommitted)
+      .otherwise(new Fail(this, "ExpiredInventoryReleaseRejected", {
+        cause: "Inventory returned an unsupported expiry release outcome.",
+        error: "InventoryInvariantViolation",
+      })));
     markOrderInventoryUnavailable.next(new Choice(this, "OrderInventoryOutcome")
       .when(
         Condition.stringEquals("$.order.status", "INVENTORY_UNAVAILABLE"),
@@ -322,9 +452,47 @@ export class MarketplaceCheckoutStack extends Stack {
     });
     commitInventory.next(new Choice(this, "InventoryCommitOutcome")
       .when(Condition.stringEquals("$.inventoryCommit.status", "COMMITTED"), inventoryCommitted)
+      .when(Condition.and(
+        Condition.stringEquals("$.inventoryCommit.status", "RESERVATION_NOT_ACTIVE"),
+        Condition.stringEquals("$.inventoryCommit.reservationStatus", "COMMITTED"),
+      ), inventoryCommitted)
+      .when(
+        Condition.stringEquals("$.inventoryCommit.status", "RESERVATION_NOT_ACTIVE"),
+        releaseExpiredInventory,
+      )
       .otherwise(invalidInventoryCommit));
+    const reservationDeadlineReached = new Choice(this, "ReservationDeadlineReached")
+      .when(
+        Condition.timestampLessThanEqualsJsonPath(
+          "$.reservationExpiresAt",
+          "$$.State.EnteredTime",
+        ),
+        releaseExpiredInventory,
+      )
+      .otherwise(commitInventory);
+    const waitForReservationDeadline = new Wait(this, "WaitForReservationDeadline", {
+      time: WaitTime.timestampPath("$.reservationExpiresAt"),
+    });
+    const waitForDeadlinePrecision = new Wait(this, "WaitForDeadlinePrecision", {
+      time: WaitTime.duration(Duration.seconds(1)),
+    });
+    waitForReservationDeadline.next(waitForDeadlinePrecision);
+    waitForDeadlinePrecision.next(releaseExpiredInventory);
+    commitInventory.addCatch(waitForReservationDeadline, {
+      resultPath: "$.inventoryCommitError",
+    });
+    const waitUntilInventoryCommit = new Wait(this, "WaitUntilInventoryCommit", {
+      time: WaitTime.timestampPath("$.inventoryCommitAt"),
+    });
+    waitUntilInventoryCommit.next(reservationDeadlineReached);
+    const inventoryCommitTiming = new Choice(this, "InventoryCommitTiming")
+      .when(Condition.isPresent("$.inventoryCommitAt"), waitUntilInventoryCommit)
+      .otherwise(reservationDeadlineReached);
     reserveInventory.next(new Choice(this, "InventoryReservationOutcome")
-      .when(Condition.stringEquals("$.inventoryReservation.status", "RESERVED"), commitInventory)
+      .when(
+        Condition.stringEquals("$.inventoryReservation.status", "RESERVED"),
+        inventoryCommitTiming,
+      )
       .when(
         Condition.stringEquals("$.inventoryReservation.status", "OUT_OF_STOCK"),
         markOrderInventoryUnavailable,
@@ -343,7 +511,7 @@ export class MarketplaceCheckoutStack extends Stack {
       },
       stateMachineType: StateMachineType.STANDARD,
       stateMachineName: "aws-architecture-lab-marketplace-checkout",
-      timeout: Duration.minutes(2),
+      timeout: Duration.minutes(7),
     });
     stateMachine.addToRolePolicy(
       new PolicyStatement({
@@ -445,8 +613,13 @@ export class MarketplaceCheckoutStack extends Stack {
     });
     new CfnOutput(this, "OrderEventSource", { value: orderEventSource });
     new CfnOutput(this, "OrderPendingEventType", { value: orderPendingEventType });
+    new CfnOutput(this, "OrderTableName", { value: orderTable.tableName });
     new CfnOutput(this, "InventoryTableName", { value: inventoryTable.tableName });
     new CfnOutput(this, "InventoryEventSource", { value: inventoryEventSource });
+    new CfnOutput(this, "InventoryCommandFunctionName", { value: inventoryFunction.functionName });
+    new CfnOutput(this, "InventoryExpiryWorkerFunctionName", {
+      value: inventoryExpiryWorker.functionName,
+    });
   }
 
   private lambdaFunction(

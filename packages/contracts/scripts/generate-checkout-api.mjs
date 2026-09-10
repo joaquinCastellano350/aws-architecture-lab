@@ -16,6 +16,7 @@ if (idempotencyParameter === undefined) throw new Error("Idempotency-Key paramet
 const lines = [
   "// Generated from openapi/checkout-api.json. Do not edit by hand.",
   "",
+  `export const checkoutApiVersion = ${JSON.stringify(document.info.version)};`,
   "export const checkoutApiPaths = {",
   `  submit: ${JSON.stringify(submitPath)},`,
   `  status: ${JSON.stringify(statusPath)},`,

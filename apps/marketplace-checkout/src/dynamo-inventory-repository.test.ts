@@ -1,6 +1,7 @@
 import {
   GetCommand,
   PutCommand,
+  QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
@@ -103,10 +104,39 @@ describe("Inventory persistence", () => {
     const outcomes = await Promise.all([inventory.execute(commit), inventory.execute(release)]);
 
     expect(outcomes.map(({ status }) => status)).toEqual(["COMMITTED", "RESERVATION_NOT_ACTIVE"]);
+    expect(outcomes[1]).toEqual(expect.objectContaining({ reservationStatus: "COMMITTED" }));
     expect(dynamo.availableQuantity("sku-final")).toBe(0);
     expect(dynamo.reservationStatus("reservation-finalize")).toBe("COMMITTED");
     expect(await inventory.execute(commit)).toEqual(outcomes[0]);
     expect(await inventory.execute(release)).toEqual(outcomes[1]);
+  });
+
+  it("rejects a commit after the business deadline and keeps the reservation releasable", async () => {
+    const dynamo = new InventoryDynamoHarness(1);
+    await repository(dynamo).execute(
+      reserveCommand("reserve-deadline", "reservation-deadline", "checkout-deadline"),
+    );
+    const lateInventory = new DynamoInventoryRepository("inventory", "inventory-outbox", {
+      client: dynamo as unknown as DynamoDBDocumentClient,
+      clock: () => new Date("2026-09-09T12:06:00.000Z"),
+      eventId: () => "inventory-event-after-deadline",
+      initialQuantity: 1,
+    });
+    const commit = {
+      ...transitionCommand("CommitInventory", "commit-after-deadline"),
+      checkoutId: "checkout-deadline",
+      reservationId: "reservation-deadline",
+      correlationId: "corr-checkout-deadline",
+    };
+
+    const first = await lateInventory.execute(commit);
+    const repeated = await lateInventory.execute(commit);
+
+    expect(first.status).toBe("RESERVATION_NOT_ACTIVE");
+    expect(first).toEqual(expect.objectContaining({ reservationStatus: "RESERVED" }));
+    expect(repeated).toEqual(first);
+    expect(dynamo.reservationStatus("reservation-deadline")).toBe("RESERVED");
+    expect(dynamo.availableQuantity("sku-final")).toBe(0);
   });
 
   it("restores stock once when a release command is delivered repeatedly", async () => {
@@ -125,6 +155,65 @@ describe("Inventory persistence", () => {
     expect(first.status).toBe("RELEASED");
     expect(repeated).toEqual(first);
     expect(dynamo.availableQuantity("sku-final")).toBe(1);
+  });
+
+  it("adds eventual-cleanup TTL only when expiry releases a reservation", async () => {
+    const dynamo = new InventoryDynamoHarness(1);
+    const inventory = repository(dynamo);
+    await inventory.execute({
+      ...reserveCommand("reserve-expired", "reservation-expired", "checkout-expired"),
+      expiresAt: "2026-09-09T11:59:59.999Z",
+    });
+
+    await inventory.execute({
+      ...transitionCommand("ReleaseInventory", "expire-sweep-reservation-expired"),
+      checkoutId: "checkout-expired",
+      reservationId: "reservation-expired",
+      correlationId: "corr-checkout-expired",
+      releaseReason: "CHECKOUT_EXPIRED",
+    });
+
+    const transaction = dynamo.commands.filter(
+      (command): command is TransactWriteCommand => command instanceof TransactWriteCommand,
+    ).at(-1);
+    expect(transaction?.input.TransactItems?.[0]?.Update).toEqual(expect.objectContaining({
+      ConditionExpression: "#status = :reserved AND expiresAt <= :now",
+      UpdateExpression: expect.stringContaining("cleanupAtEpochSeconds = :cleanupAtEpochSeconds"),
+      ExpressionAttributeValues: expect.objectContaining({
+        ":cleanupAtEpochSeconds": 1_789_560_000,
+      }),
+    }));
+    expect(dynamo.events.at(-1)).toEqual(expect.objectContaining({
+      eventType: "InventoryReleased",
+      payload: expect.objectContaining({
+        checkoutId: "checkout-expired",
+        releaseReason: "CHECKOUT_EXPIRED",
+      }),
+    }));
+  });
+
+  it("rejects an expiry release before the exact business deadline", async () => {
+    const dynamo = new InventoryDynamoHarness(1);
+    const inventory = repository(dynamo);
+    await inventory.execute(
+      reserveCommand("reserve-not-due", "reservation-not-due", "checkout-not-due"),
+    );
+
+    const outcome = await inventory.execute({
+      ...transitionCommand("ReleaseInventory", "expire-sweep-reservation-not-due"),
+      checkoutId: "checkout-not-due",
+      reservationId: "reservation-not-due",
+      correlationId: "corr-checkout-not-due",
+      releaseReason: "CHECKOUT_EXPIRED",
+    });
+
+    expect(outcome).toEqual(expect.objectContaining({
+      status: "RESERVATION_NOT_ACTIVE",
+      reservationStatus: "RESERVED",
+    }));
+    expect(dynamo.reservationStatus("reservation-not-due")).toBe("RESERVED");
+    expect(dynamo.availableQuantity("sku-final")).toBe(0);
+    expect(dynamo.events).toHaveLength(1);
   });
 
   it("returns one stable result to concurrent duplicate commit and release deliveries", async () => {
@@ -177,6 +266,53 @@ describe("Inventory persistence", () => {
     expect(transaction?.input.TransactItems?.[0]?.Update?.ConditionExpression)
       .toContain(":initialQuantity >= :quantity");
   });
+
+  it("queries only RESERVED reservations whose business expiry is due", async () => {
+    const sent: unknown[] = [];
+    const client = {
+      async send(command: unknown) {
+        sent.push(command);
+        if (command instanceof QueryCommand) {
+          return {
+            Items: [{
+              recordKey: "RESERVATION#reservation-expired",
+              recordType: "RESERVATION",
+              reservationId: "reservation-expired",
+              checkoutId: "checkout-expired",
+              correlationId: "corr-expired",
+              itemId: "sku-expired",
+              quantity: 1,
+              status: "RESERVED",
+              expiresAt: "2026-09-09T11:59:00.000Z",
+              createdAt: "2026-09-09T11:55:00.000Z",
+              updatedAt: "2026-09-09T11:55:00.000Z",
+            }],
+          };
+        }
+        throw new Error("Unexpected DynamoDB command");
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const inventory = new DynamoInventoryRepository("inventory", "inventory-outbox", {
+      client,
+      expiryIndexName: "ReservationExpiryIndex",
+    });
+
+    await expect(inventory.findExpiredReservations("2026-09-09T12:00:00.000Z", 25)).resolves.toEqual([
+      expect.objectContaining({ reservationId: "reservation-expired", status: "RESERVED" }),
+    ]);
+    expect(sent).toEqual([
+      expect.objectContaining({
+        input: expect.objectContaining({
+          TableName: "inventory",
+          IndexName: "ReservationExpiryIndex",
+          KeyConditionExpression: "#status = :reserved AND expiresAt <= :cutoff",
+          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeValues: { ":reserved": "RESERVED", ":cutoff": "2026-09-09T12:00:00.000Z" },
+          Limit: 25,
+        }),
+      }),
+    ]);
+  });
 });
 
 function repository(client: InventoryDynamoHarness) {
@@ -216,6 +352,7 @@ function transitionCommand(
     operationId,
     checkoutId: "checkout-finalize",
     reservationId: "reservation-finalize",
+    ...(commandType === "ReleaseInventory" ? { releaseReason: "COMPENSATION" as const } : {}),
     correlationId: "corr-checkout-finalize",
     causationId: "execution-123",
   };
@@ -341,6 +478,16 @@ class InventoryDynamoHarness {
     }
     const reservation = records.get(key);
     if (reservation?.status !== "RESERVED") throw conditionalFailure();
+    if (typeof values[":now"] === "string" && typeof reservation.expiresAt === "string") {
+      const expiresAt = reservation.expiresAt;
+      const now = values[":now"];
+      if (update.ConditionExpression?.includes("expiresAt > :now") && expiresAt <= now) {
+        throw conditionalFailure();
+      }
+      if (update.ConditionExpression?.includes("expiresAt <= :now") && expiresAt > now) {
+        throw conditionalFailure();
+      }
+    }
     records.set(key, { ...reservation, status: values[":status"], updatedAt: values[":updatedAt"] });
   }
 }

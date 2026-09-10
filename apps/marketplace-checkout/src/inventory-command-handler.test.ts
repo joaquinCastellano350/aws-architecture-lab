@@ -57,6 +57,7 @@ function transitionCommand(commandType: "CommitInventory" | "ReleaseInventory") 
     operationId: `${commandType}-checkout-123`,
     checkoutId: "checkout-123",
     reservationId: "reservation-checkout-123",
+    ...(commandType === "ReleaseInventory" ? { releaseReason: "COMPENSATION" as const } : {}),
     correlationId: "corr-123",
     causationId: "execution-123",
   };

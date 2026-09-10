@@ -9,8 +9,11 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import type {
   CreatePendingOrderCommand,
+  MarkOrderExpiredCommand,
+  MarkOrderExpiredOutcome,
   MarkOrderInventoryUnavailableCommand,
   MarkOrderInventoryUnavailableOutcome,
+  OrderExpiredEvent,
   OrderInventoryUnavailableEvent,
   OrderPendingEvent,
 } from "@aws-architecture-lab/contracts";
@@ -94,25 +97,61 @@ export async function markOrderInventoryUnavailable(
   input: MarkOrderInventoryUnavailableCommand,
   dependencies: OrderRepositoryDependencies = {},
 ): Promise<MarkOrderInventoryUnavailableOutcome> {
+  return markOrderTerminal(
+    orderTableName,
+    outboxTableName,
+    input,
+    "INVENTORY_UNAVAILABLE",
+    dependencies,
+  ) as Promise<MarkOrderInventoryUnavailableOutcome>;
+}
+
+export async function markOrderExpired(
+  orderTableName: string,
+  outboxTableName: string,
+  input: MarkOrderExpiredCommand,
+  dependencies: OrderRepositoryDependencies = {},
+): Promise<MarkOrderExpiredOutcome> {
+  return markOrderTerminal(
+    orderTableName,
+    outboxTableName,
+    input,
+    "EXPIRED",
+    dependencies,
+  ) as Promise<MarkOrderExpiredOutcome>;
+}
+
+type TerminalOrderCommand = MarkOrderInventoryUnavailableCommand | MarkOrderExpiredCommand;
+type TerminalOrderOutcome = MarkOrderInventoryUnavailableOutcome | MarkOrderExpiredOutcome;
+type TerminalOrderEvent = OrderInventoryUnavailableEvent | OrderExpiredEvent;
+
+async function markOrderTerminal(
+  orderTableName: string,
+  outboxTableName: string,
+  input: TerminalOrderCommand,
+  status: TerminalOrderOutcome["status"],
+  dependencies: OrderRepositoryDependencies,
+): Promise<TerminalOrderOutcome> {
   const now = (dependencies.clock ?? (() => new Date()))();
   const eventId = (dependencies.eventId ?? randomUUID)();
-  const outcome: MarkOrderInventoryUnavailableOutcome = {
+  const outcome: TerminalOrderOutcome = {
     schemaVersion: "1.0",
     checkoutId: input.checkoutId,
     correlationId: input.correlationId,
-    status: "INVENTORY_UNAVAILABLE",
+    status,
   };
-  const event: OrderInventoryUnavailableEvent = {
+  const eventType = status === "EXPIRED" ? "OrderExpired" : "OrderInventoryUnavailable";
+  const event = {
     eventId,
-    eventType: "OrderInventoryUnavailable",
+    eventType,
     eventVersion: "1.0",
     occurredAt: now.toISOString(),
     correlationId: input.correlationId,
     causationId: input.causationId,
     aggregateType: "Order",
     aggregateId: input.checkoutId,
-    payload: { status: "INVENTORY_UNAVAILABLE" },
-  };
+    payload: { status },
+  } as TerminalOrderEvent;
   const client = dependencies.client ?? DynamoDBDocumentClient.from(new DynamoDBClient({}), {
     marshallOptions: { removeUndefinedValues: true },
   });
@@ -129,12 +168,12 @@ export async function markOrderInventoryUnavailable(
           Update: {
             TableName: orderTableName,
             Key: { checkoutId: input.checkoutId },
-            UpdateExpression: "SET #status = :unavailable, updatedAt = :updatedAt",
+            UpdateExpression: "SET #status = :terminal, updatedAt = :updatedAt",
             ConditionExpression: "#status = :pending AND correlationId = :correlationId",
             ExpressionAttributeNames: { "#status": "status" },
             ExpressionAttributeValues: {
               ":pending": "PENDING",
-              ":unavailable": "INVENTORY_UNAVAILABLE",
+              ":terminal": status,
               ":correlationId": input.correlationId,
               ":updatedAt": now.toISOString(),
             },
@@ -175,7 +214,7 @@ export async function markOrderInventoryUnavailable(
     }));
     const recorded = existing.Item as Order | undefined;
     if (
-      recorded?.status !== "INVENTORY_UNAVAILABLE" ||
+      recorded?.status !== status ||
       recorded.correlationId !== input.correlationId
     ) {
       throw new Error("Order state invariant violated");
@@ -190,7 +229,7 @@ interface OrderOperation {
   readonly operationId: string;
   readonly payloadHash: string;
   readonly state: "SUCCEEDED";
-  readonly result: MarkOrderInventoryUnavailableOutcome;
+  readonly result: TerminalOrderOutcome;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -198,7 +237,7 @@ interface OrderOperation {
 function orderOperation(
   operationId: string,
   payloadHash: string,
-  result: MarkOrderInventoryUnavailableOutcome,
+  result: TerminalOrderOutcome,
   now: string,
 ): OrderOperation {
   return {
@@ -230,7 +269,7 @@ async function recordCompletedOrderOperation(
   client: DynamoDBDocumentClient,
   tableName: string,
   operation: OrderOperation,
-): Promise<MarkOrderInventoryUnavailableOutcome> {
+): Promise<TerminalOrderOutcome> {
   try {
     await client.send(new PutCommand({
       TableName: tableName,
@@ -249,7 +288,7 @@ async function recordCompletedOrderOperation(
 function recordedOrderOutcome(
   operation: OrderOperation,
   payloadHash: string,
-): MarkOrderInventoryUnavailableOutcome {
+): TerminalOrderOutcome {
   if (operation.payloadHash !== payloadHash) {
     throw new Error("Order operation ID was reused with a different payload");
   }

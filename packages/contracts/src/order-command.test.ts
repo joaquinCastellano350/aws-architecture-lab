@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   validateCreatePendingOrderCommand,
   validateCreatePendingOrderOutcome,
+  validateMarkOrderExpiredCommand,
+  validateMarkOrderExpiredOutcome,
   validateMarkOrderInventoryUnavailableCommand,
   validateMarkOrderInventoryUnavailableOutcome,
 } from "./generated/order-command.js";
@@ -47,6 +49,23 @@ describe("Order command JSON schemas", () => {
       checkoutId: "checkout-123",
       correlationId: "corr-123",
       status: "INVENTORY_UNAVAILABLE",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the typed terminal Order expiry command and outcome", () => {
+    expect(validateMarkOrderExpiredCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderExpired",
+      operationId: "expire-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "inventory-released-event-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderExpiredOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "EXPIRED",
     }).ok).toBe(true);
   });
 

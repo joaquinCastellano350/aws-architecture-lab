@@ -42,6 +42,9 @@ describe("marketplace checkout Order and Inventory Saga", () => {
     });
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       KeySchema: [{ AttributeName: "recordKey", KeyType: "HASH" }],
+      AttributeDefinitions: Match.arrayWith([
+        { AttributeName: "expiresAt", AttributeType: "S" },
+      ]),
       SSESpecification: { SSEEnabled: true },
       BillingMode: "PAY_PER_REQUEST",
       OnDemandThroughput: { MaxReadRequestUnits: 100, MaxWriteRequestUnits: 100 },
@@ -166,9 +169,8 @@ describe("marketplace checkout Order and Inventory Saga", () => {
       fn.Properties?.Environment?.Variables?.INVENTORY_OUTBOX_TABLE_NAME !== undefined
     )).toBe(true);
     const commandFunctions = functions.filter((fn) =>
-      fn.Properties?.Environment?.Variables?.INVENTORY_TABLE_NAME !== undefined ||
-      fn.Properties?.Environment?.Variables?.ORDER_TABLE_NAME !== undefined &&
-        fn.Properties?.Environment?.Variables?.ORDER_OUTBOX_TABLE_NAME !== undefined
+      fn.Properties?.FunctionName === "aws-architecture-lab-inventory-command" ||
+      fn.Properties?.FunctionName === "aws-architecture-lab-order-command"
     );
     expect(commandFunctions).toHaveLength(2);
     expect(commandFunctions.every((fn) => fn.Properties?.Timeout === 3)).toBe(true);
@@ -189,12 +191,73 @@ describe("marketplace checkout Order and Inventory Saga", () => {
     expect(definition).toContain("TransactionConflictException");
     expect(definition).toContain("JitterStrategy");
     expect(definition).toContain("FULL");
+    expect(definition).toContain("ReservationDeadlineReached");
+    expect(definition).toContain("WaitForReservationDeadline");
+    expect(definition).toContain("WaitForDeadlinePrecision");
+    expect(definition).toContain("WaitUntilInventoryCommit");
+    expect(definition).toContain("ReleaseExpiredInventory");
+    expect(definition).toContain("CHECKOUT_EXPIRED");
+    expect(definition).toContain("reservationStatus");
+    expect(definition).toContain("MarkOrderExpired");
+    expect(definition).toContain("EXPIRED");
+    expect(definition).toContain("TimeoutSeconds");
+    expect(definition).toContain("420");
 
     const stateMachine = Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0];
     const stateMachineRoleId = stateMachine?.Properties?.RoleArn?.["Fn::GetAtt"]?.[0];
     const coordinatorPolicies = Object.values(template.findResources("AWS::IAM::Policy"))
       .filter((policy) => JSON.stringify(policy.Properties?.Roles).includes(stateMachineRoleId));
     expect(JSON.stringify(coordinatorPolicies)).not.toContain("dynamodb:");
+  });
+
+  it("reconciles due reservations from an expiry index and uses TTL only for cleanup", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      KeySchema: [{ AttributeName: "recordKey", KeyType: "HASH" }],
+      GlobalSecondaryIndexes: [Match.objectLike({
+        IndexName: "ReservationExpiryIndex",
+        KeySchema: [
+          { AttributeName: "status", KeyType: "HASH" },
+          { AttributeName: "expiresAt", KeyType: "RANGE" },
+        ],
+      })],
+      TimeToLiveSpecification: {
+        AttributeName: "cleanupAtEpochSeconds",
+        Enabled: true,
+      },
+    });
+    template.hasResourceProperties("AWS::Events::Rule", {
+      ScheduleExpression: "rate(1 minute)",
+      State: "ENABLED",
+      Targets: Match.arrayWith([Match.objectLike({ Arn: Match.anyValue() })]),
+    });
+
+    const functions = Object.values(template.findResources("AWS::Lambda::Function"));
+    const expiryWorker = functions.find((fn) =>
+      fn.Properties?.Environment?.Variables?.INVENTORY_EXPIRY_INDEX_NAME !== undefined
+    );
+    expect(expiryWorker?.Properties?.Environment?.Variables).toEqual(expect.objectContaining({
+      INVENTORY_EXPIRY_BATCH_LIMIT: "25",
+      INVENTORY_EXPIRY_INDEX_NAME: "ReservationExpiryIndex",
+    }));
+    const policies = JSON.stringify(template.findResources("AWS::IAM::Policy"));
+    expect(policies).toContain("dynamodb:Query");
+    expect(policies).toContain("ReservationExpiryIndex");
+  });
+
+  it("repairs the customer-visible Order from an expired Inventory release fact", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: {
+        source: ["aws-architecture-lab.inventory"],
+        "detail-type": ["InventoryReleased"],
+        detail: { payload: { releaseReason: ["CHECKOUT_EXPIRED"] } },
+      },
+      EventBusName: Match.anyValue(),
+      Targets: Match.arrayWith([Match.objectLike({
+        Arn: Match.anyValue(),
+        DeadLetterConfig: { Arn: Match.anyValue() },
+        RetryPolicy: { MaximumEventAgeInSeconds: 300, MaximumRetryAttempts: 2 },
+      })]),
+    });
   });
 
   it("authorizes workflow starts against the state machine and only through LIVE", () => {
@@ -238,7 +301,7 @@ describe("marketplace checkout Order and Inventory Saga", () => {
     });
 
     const functions = Object.values(template.findResources("AWS::Lambda::Function"));
-    expect(functions).toHaveLength(6);
+    expect(functions).toHaveLength(8);
     for (const fn of functions) {
       expect(fn.Properties?.ReservedConcurrentExecutions).toBeUndefined();
     }
@@ -250,7 +313,7 @@ describe("marketplace checkout Order and Inventory Saga", () => {
       const configuredTemplate = workloadTemplate({ lambdaReservedConcurrency: 3 });
       const functions = Object.values(configuredTemplate.findResources("AWS::Lambda::Function"));
 
-      expect(functions).toHaveLength(6);
+      expect(functions).toHaveLength(8);
       for (const fn of functions) {
         expect(fn.Properties?.ReservedConcurrentExecutions).toBe(3);
       }

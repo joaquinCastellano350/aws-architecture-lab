@@ -2,9 +2,11 @@ import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import {
   validateInventoryEvent,
+  validateOrderExpiredEvent,
   validateOrderInventoryUnavailableEvent,
   validateOrderPendingEvent,
   type InventoryEvent,
+  type OrderExpiredEvent,
   type OrderInventoryUnavailableEvent,
   type OrderPendingEvent,
 } from "@aws-architecture-lab/contracts";
@@ -22,7 +24,7 @@ export interface OutboxPublisherDependencies {
   readonly eventSource: string;
 }
 
-type DomainEvent = InventoryEvent | OrderInventoryUnavailableEvent | OrderPendingEvent;
+type DomainEvent = InventoryEvent | OrderExpiredEvent | OrderInventoryUnavailableEvent | OrderPendingEvent;
 
 export function createOutboxPublisher(dependencies: OutboxPublisherDependencies) {
   return async (input: DynamoDBStreamEvent): Promise<DynamoDBBatchResponse> => {
@@ -95,7 +97,9 @@ function validateDomainEvent(
 ): { readonly ok: true; readonly value: DomainEvent } | { readonly ok: false } {
   if (eventSource === "aws-architecture-lab.order") {
     const pending = validateOrderPendingEvent(input);
-    return pending.ok ? pending : validateOrderInventoryUnavailableEvent(input);
+    if (pending.ok) return pending;
+    const unavailable = validateOrderInventoryUnavailableEvent(input);
+    return unavailable.ok ? unavailable : validateOrderExpiredEvent(input);
   }
   if (eventSource === "aws-architecture-lab.inventory") return validateInventoryEvent(input);
   return { ok: false };

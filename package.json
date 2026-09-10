@@ -17,6 +17,7 @@
     "preflight": "npm run preflight --workspace @aws-architecture-lab/infra",
     "workload:deploy": "npm run deploy:workload --workspace @aws-architecture-lab/infra",
     "workload:destroy": "npm run destroy:workload --workspace @aws-architecture-lab/infra",
+    "workload:expiry": "npm run expiry:workload --workspace @aws-architecture-lab/infra",
     "workload:smoke": "npm run smoke:workload --workspace @aws-architecture-lab/infra",
     "workload:synth": "npm run synth:workload --workspace @aws-architecture-lab/infra",
     "test": "npm run test --workspaces --if-present",
