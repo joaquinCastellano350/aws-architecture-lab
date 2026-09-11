@@ -98,8 +98,9 @@ The first ephemeral workload exposes the OpenAPI-defined `POST /checkouts` and
 `GET /checkouts/{checkoutId}` operations. Both require IAM/SigV4. Submission is
 asynchronous: a successful POST returns `202 Accepted` and a status location while a
 Step Functions Standard execution, admitted through the `LIVE` alias, creates the
-customer-visible pending Order, reserves Inventory without overselling, and authorizes a
-manual-capture Payment through a provider-neutral capability. Optional additive `itemId`
+customer-visible pending Order, reserves Inventory without overselling, captures a
+manual-capture Payment through a provider-neutral capability, commits Inventory, completes
+an SQS-buffered Fulfillment handoff, and confirms the Order. Optional additive `itemId`
 and `quantity` request fields select stock; older v1 clients use the deterministic lab item
 and a quantity of one.
 
@@ -111,13 +112,15 @@ key namespace. They can be changed only through the output
 `FakePaymentFailurePlanRoleArn`; the Payment Lambda has read-only access and consumes them
 to model rejection, throttling, timeout, and commit-then-response-loss. Production-reference
 synthesis disables this test control plane with `enableFakePaymentFailurePlans: false`.
-The workflow contains the capture path but will enter it only after a typed
-`fulfillmentReservation.status = RESERVED` outcome. The normal API path intentionally
-stops at `PaymentAuthorized` until Issue #8 installs the real SQS-backed Fulfillment
-capacity/callback step; it does not invent a capacity reservation.
+The workflow enters capture only after a typed Fulfillment capacity reservation. It then
+commits Inventory and sends a versioned handoff command with a Step Functions task token
+in the body of an encrypted SQS message. A dedicated worker role heartbeats, commits the
+irreversible handoff idempotently, and completes the callback before Order becomes
+`CONFIRMED`. Task tokens are never placed in message attributes, logs, traces, metrics,
+errors, URLs, or persistence.
 
-The OpenAPI 2.0 contract adds the `EXPIRED` customer outcome while continuing to accept the
-existing v1 submission schema. Reservations carry a five-minute business deadline. The
+The OpenAPI 3.0 contract exposes the `CONFIRMED` and `EXPIRED` customer outcomes while
+continuing to accept the existing v1 submission schema. Reservations carry a five-minute business deadline. The
 workflow releases a reservation that reaches the deadline before commit and exposes the
 Order as `EXPIRED`. A one-minute
 reconciliation schedule queries the reservation-expiry index and releases abandoned
@@ -137,9 +140,9 @@ npm run workload:destroy
 ```
 
 The smoke command signs real API requests with the active AWS credentials, repeats the
-POST to prove idempotent admission, polls GET until the pending Order is visible, and
-verifies that its Inventory reservation reaches `RESERVED` and Payment reaches
-`AUTHORIZED`. It then waits for the
+POST to prove idempotent admission, polls GET until the Order is `CONFIRMED`, and
+verifies that Inventory is `COMMITTED`, Payment is `CAPTURED`, and Fulfillment is
+`HANDED_OFF`. It then waits for the
 committed `OrderPending` fact in the audit table, republishes that
 event alongside a distinct event, and proves the audit consumer deduplicates the replay
 without dropping the distinct fact. Destroy removes the ephemeral workload and verifies

@@ -8,5 +8,7 @@ export * from "./generated/inventory-command.js";
 export * from "./generated/inventory-event.js";
 export * from "./generated/payment-command.js";
 export * from "./generated/payment-event.js";
+export * from "./generated/fulfillment-command.js";
+export * from "./generated/fulfillment-event.js";
 export * from "./generated/order-command.js";
 export * from "./generated/order-event.js";

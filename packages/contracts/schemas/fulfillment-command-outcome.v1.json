@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:fulfillment:command-outcome:v1",
+  "title": "FulfillmentCommandOutcome",
+  "type": "object",
+  "required": ["schemaVersion", "operationId", "checkoutId", "reservationId", "status"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "reservationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "status": { "type": "string", "enum": ["RESERVED", "HANDED_OFF", "RESERVATION_NOT_ACTIVE"] },
+    "reservationStatus": { "type": "string", "enum": ["RESERVED", "HANDED_OFF"] }
+  },
+  "additionalProperties": true
+}

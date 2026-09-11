@@ -5,7 +5,7 @@ truth for commands, outcomes, and domain events. `npm run generate` in the contr
 workspace regenerates TypeScript types and runtime validators; generated files are not
 maintained independently.
 
-The contracts currently define the versioned Order and Inventory commands, outcomes, and
-domain-event envelopes. Payment adds provider-neutral authorize, capture, cancel, refund,
-and retrieve commands, typed outcomes, and committed-fact envelopes. Later increments add
-Fulfillment and compensation schemas without changing these v1 contracts in place.
+The contracts currently define versioned Order, Inventory, Payment, and Fulfillment
+commands, outcomes, and committed-fact envelopes. Fulfillment keeps reservation and
+irreversible-handoff contracts independent of the SQS callback envelope. Later increments
+add compensation schemas without changing these v1 contracts in place.

@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createPendingOrder,
+  markOrderConfirmed,
   markOrderExpired,
   markOrderInventoryUnavailable,
 } from "./dynamo-order-repository.js";
@@ -203,6 +204,51 @@ describe("Order persistence", () => {
         }),
       },
     ]);
+  });
+
+  it("confirms the customer-visible Order and publishes the committed fact atomically", async () => {
+    const sent: unknown[] = [];
+    const client = {
+      async send(command: unknown) {
+        sent.push(command);
+        return {};
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    const order = await markOrderConfirmed("orders", "order-outbox", {
+      schemaVersion: "1.0",
+      commandType: "MarkOrderConfirmed",
+      operationId: "confirm-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "fulfillment-handoff-123",
+    }, {
+      client,
+      clock: () => new Date("2026-09-11T12:00:00.000Z"),
+      eventId: () => "event-confirmed",
+    });
+
+    expect(order.status).toBe("CONFIRMED");
+    const transaction = sent.find(
+      (command): command is TransactWriteCommand => command instanceof TransactWriteCommand,
+    );
+    expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Update: expect.objectContaining({
+          ConditionExpression: "#status = :pending AND correlationId = :correlationId",
+        }),
+      }),
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          TableName: "order-outbox",
+          Item: expect.objectContaining({
+            eventId: "event-confirmed",
+            eventType: "OrderConfirmed",
+            payload: { status: "CONFIRMED" },
+          }),
+        }),
+      }),
+    ]));
   });
 
   it("returns the recorded unavailable Order when the transition repeats", async () => {

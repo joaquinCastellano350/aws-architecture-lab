@@ -34,7 +34,7 @@ import {
   ServicePrincipal,
 } from "aws-cdk-lib/aws-iam";
 import { CfnVersion, Runtime, StartingPosition, type IFunction } from "aws-cdk-lib/aws-lambda";
-import { DynamoEventSource, SqsDlq } from "aws-cdk-lib/aws-lambda-event-sources";
+import { DynamoEventSource, SqsDlq, SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
@@ -45,6 +45,7 @@ import {
   Condition,
   DefinitionBody,
   Fail,
+  IntegrationPattern,
   JsonPath,
   JitterType,
   LogLevel,
@@ -52,10 +53,11 @@ import {
   StateMachineType,
   Succeed,
   TaskInput,
+  Timeout,
   Wait,
   WaitTime,
 } from "aws-cdk-lib/aws-stepfunctions";
-import { LambdaInvoke } from "aws-cdk-lib/aws-stepfunctions-tasks";
+import { LambdaInvoke, SqsSendMessage } from "aws-cdk-lib/aws-stepfunctions-tasks";
 import type { Construct } from "constructs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -63,6 +65,7 @@ const orderEventSource = "aws-architecture-lab.order";
 const orderPendingEventType = "OrderPending";
 const inventoryEventSource = "aws-architecture-lab.inventory";
 const paymentEventSource = "aws-architecture-lab.payment";
+const fulfillmentEventSource = "aws-architecture-lab.fulfillment";
 
 export interface MarketplaceCheckoutStackProps extends StackProps {
   readonly enableFakePaymentFailurePlans?: boolean;
@@ -160,6 +163,23 @@ export class MarketplaceCheckoutStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
     const paymentOutboxTable = new Table(this, "PaymentOutbox", {
+      partitionKey: { name: "eventId", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+      stream: StreamViewType.NEW_IMAGE,
+    });
+    const fulfillmentTable = new Table(this, "Fulfillment", {
+      partitionKey: { name: "recordKey", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const fulfillmentOutboxTable = new Table(this, "FulfillmentOutbox", {
       partitionKey: { name: "eventId", type: AttributeType.STRING },
       billingMode: BillingMode.PAY_PER_REQUEST,
       encryption: TableEncryption.AWS_MANAGED,
@@ -277,6 +297,35 @@ export class MarketplaceCheckoutStack extends Stack {
     }));
     eventBus.grantPutEventsTo(paymentOutboxPublisher);
 
+    const failedFulfillmentOutboxRecords = new Queue(
+      this,
+      "FulfillmentOutboxFailureDestination",
+      {
+        encryption: QueueEncryption.SQS_MANAGED,
+        retentionPeriod: Duration.days(4),
+        removalPolicy: RemovalPolicy.DESTROY,
+      },
+    );
+    const fulfillmentOutboxPublisher = this.lambdaFunction(
+      "FulfillmentOutboxPublisher",
+      "outbox-publisher.ts",
+      {
+        EVENT_BUS_NAME: eventBus.eventBusName,
+        EVENT_SOURCE: fulfillmentEventSource,
+      },
+    );
+    fulfillmentOutboxPublisher.addEventSource(
+      new DynamoEventSource(fulfillmentOutboxTable as ITable, {
+        batchSize: 10,
+        bisectBatchOnError: true,
+        onFailure: new SqsDlq(failedFulfillmentOutboxRecords),
+        reportBatchItemFailures: true,
+        retryAttempts: 3,
+        startingPosition: StartingPosition.LATEST,
+      }),
+    );
+    eventBus.grantPutEventsTo(fulfillmentOutboxPublisher);
+
     const auditConsumer = this.lambdaFunction("OrderAuditConsumer", "audit-consumer.ts", {
       AUDIT_TABLE_NAME: auditTable.tableName,
       EVENT_SOURCE: orderEventSource,
@@ -361,6 +410,70 @@ export class MarketplaceCheckoutStack extends Stack {
     const paymentFunctionVersion = paymentFunction.currentVersion;
     const cfnPaymentFunctionVersion = paymentFunctionVersion.node.defaultChild as CfnVersion;
     retainAcrossDeployments(cfnPaymentFunctionVersion);
+
+    const fulfillmentFunction = this.lambdaFunction(
+      "FulfillmentCommand",
+      "fulfillment-lambda.ts",
+      {
+        FULFILLMENT_OUTBOX_TABLE_NAME: fulfillmentOutboxTable.tableName,
+        FULFILLMENT_TABLE_NAME: fulfillmentTable.tableName,
+      },
+      Duration.seconds(3),
+    );
+    fulfillmentTable.grantReadWriteData(fulfillmentFunction);
+    fulfillmentOutboxTable.grantWriteData(fulfillmentFunction);
+    fulfillmentFunction.addToRolePolicy(new PolicyStatement({
+      actions: ["dynamodb:TransactWriteItems"],
+      resources: [fulfillmentTable.tableArn, fulfillmentOutboxTable.tableArn],
+    }));
+    const fulfillmentFunctionVersion = fulfillmentFunction.currentVersion;
+    const cfnFulfillmentFunctionVersion =
+      fulfillmentFunctionVersion.node.defaultChild as CfnVersion;
+    retainAcrossDeployments(cfnFulfillmentFunctionVersion);
+
+    const failedFulfillmentWork = new Queue(this, "FulfillmentWorkDeadLetterQueue", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(4),
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const fulfillmentQueue = new Queue(this, "FulfillmentWorkQueue", {
+      deadLetterQueue: { queue: failedFulfillmentWork, maxReceiveCount: 3 },
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(4),
+      visibilityTimeout: Duration.seconds(60),
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const fulfillmentWorkerRole = new Role(this, "FulfillmentWorkerRole", {
+      assumedBy: new ServicePrincipal("lambda.amazonaws.com"),
+      description: "Isolated SQS and Step Functions callback role for Fulfillment handoff.",
+    });
+    const fulfillmentWorker = this.lambdaFunction(
+      "FulfillmentWorker",
+      "fulfillment-worker-lambda.ts",
+      {
+        FULFILLMENT_FUNCTION_ARN: fulfillmentFunctionVersion.functionArn,
+      },
+      Duration.seconds(30),
+      fulfillmentWorkerRole,
+    );
+    fulfillmentFunctionVersion.grantInvoke(fulfillmentWorkerRole);
+    fulfillmentWorker.addToRolePolicy(new PolicyStatement({
+      actions: [
+        "states:SendTaskHeartbeat",
+        "states:SendTaskSuccess",
+        "states:SendTaskFailure",
+      ],
+      resources: ["*"],
+    }));
+    const fulfillmentWorkerVersion = fulfillmentWorker.currentVersion;
+    const cfnFulfillmentWorkerVersion =
+      fulfillmentWorkerVersion.node.defaultChild as CfnVersion;
+    retainAcrossDeployments(cfnFulfillmentWorkerVersion);
+    fulfillmentWorkerVersion.addEventSource(new SqsEventSource(fulfillmentQueue, {
+      batchSize: 10,
+      maxConcurrency: 2,
+      reportBatchItemFailures: true,
+    }));
 
     const inventoryExpiryWorker = this.lambdaFunction(
       "InventoryExpiryWorker",
@@ -501,6 +614,28 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addPaymentCommandRetry(authorizePayment);
+    const reserveFulfillment = new LambdaInvoke(this, "ReserveFulfillment", {
+      lambdaFunction: fulfillmentFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "ReserveFulfillment",
+        operationId: JsonPath.format(
+          "reserve-fulfillment-{}",
+          JsonPath.stringAt("$.checkoutId"),
+        ),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        reservationId: JsonPath.format(
+          "fulfillment-{}",
+          JsonPath.stringAt("$.checkoutId"),
+        ),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.fulfillmentReservation",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(reserveFulfillment);
     const capturePayment = new LambdaInvoke(this, "CapturePayment", {
       lambdaFunction: paymentFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
@@ -517,6 +652,28 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addPaymentCommandRetry(capturePayment);
+    const handoffFulfillment = new SqsSendMessage(this, "HandoffFulfillment", {
+      queue: fulfillmentQueue,
+      integrationPattern: IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+      heartbeatTimeout: Timeout.duration(Duration.minutes(1)),
+      taskTimeout: Timeout.duration(Duration.minutes(5)),
+      messageBody: TaskInput.fromObject({
+        taskToken: JsonPath.taskToken,
+        command: {
+          schemaVersion: "1.0",
+          commandType: "HandoffFulfillment",
+          operationId: JsonPath.format(
+            "handoff-fulfillment-{}",
+            JsonPath.stringAt("$.checkoutId"),
+          ),
+          checkoutId: JsonPath.stringAt("$.checkoutId"),
+          reservationId: JsonPath.stringAt("$.fulfillmentReservation.reservationId"),
+          correlationId: JsonPath.stringAt("$.correlationId"),
+          causationId: JsonPath.stringAt("$$.Execution.Id"),
+        },
+      }),
+      resultPath: "$.fulfillmentHandoff",
+    });
     const releaseExpiredInventory = new LambdaInvoke(this, "ReleaseExpiredInventory", {
       lambdaFunction: inventoryFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
@@ -534,7 +691,6 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(releaseExpiredInventory);
-    const inventoryCommitted = new Succeed(this, "InventoryCommitted");
     const inventoryUnavailable = new Succeed(this, "InventoryUnavailable");
     const paymentAuthorized = new Succeed(this, "PaymentAuthorized");
     const paymentRejected = new Succeed(this, "PaymentRejected");
@@ -571,7 +727,41 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(markOrderExpired);
+    const markOrderConfirmed = new LambdaInvoke(this, "MarkOrderConfirmed", {
+      lambdaFunction: orderFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "MarkOrderConfirmed",
+        operationId: JsonPath.format(
+          "confirm-order-{}",
+          JsonPath.stringAt("$.checkoutId"),
+        ),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.order",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(markOrderConfirmed);
     const orderExpired = new Succeed(this, "OrderExpired");
+    const checkoutConfirmed = new Succeed(this, "CheckoutConfirmed");
+    markOrderConfirmed.next(new Choice(this, "OrderConfirmationOutcome")
+      .when(Condition.stringEquals("$.order.status", "CONFIRMED"), checkoutConfirmed)
+      .otherwise(new Fail(this, "OrderConfirmationRejected", {
+        cause: "Order returned an unsupported confirmation outcome.",
+        error: "OrderInvariantViolation",
+      })));
+    handoffFulfillment.next(new Choice(this, "FulfillmentHandoffOutcome")
+      .when(
+        Condition.stringEquals("$.fulfillmentHandoff.status", "HANDED_OFF"),
+        markOrderConfirmed,
+      )
+      .otherwise(new Fail(this, "FulfillmentHandoffRejected", {
+        cause: "Fulfillment returned an unsupported handoff outcome.",
+        error: "FulfillmentInvariantViolation",
+      })));
     markOrderExpired.next(new Choice(this, "OrderExpiryOutcome")
       .when(Condition.stringEquals("$.order.status", "EXPIRED"), orderExpired)
       .otherwise(new Fail(this, "OrderExpiryOutcomeRejected", {
@@ -587,7 +777,7 @@ export class MarketplaceCheckoutStack extends Stack {
       .when(Condition.and(
         Condition.stringEquals("$.inventoryRelease.status", "RESERVATION_NOT_ACTIVE"),
         Condition.stringEquals("$.inventoryRelease.reservationStatus", "COMMITTED"),
-      ), inventoryCommitted)
+      ), handoffFulfillment)
       .otherwise(new Fail(this, "ExpiredInventoryReleaseRejected", {
         cause: "Inventory returned an unsupported expiry release outcome.",
         error: "InventoryInvariantViolation",
@@ -606,11 +796,11 @@ export class MarketplaceCheckoutStack extends Stack {
       error: "InventoryInvariantViolation",
     });
     commitInventory.next(new Choice(this, "InventoryCommitOutcome")
-      .when(Condition.stringEquals("$.inventoryCommit.status", "COMMITTED"), inventoryCommitted)
+      .when(Condition.stringEquals("$.inventoryCommit.status", "COMMITTED"), handoffFulfillment)
       .when(Condition.and(
         Condition.stringEquals("$.inventoryCommit.status", "RESERVATION_NOT_ACTIVE"),
         Condition.stringEquals("$.inventoryCommit.reservationStatus", "COMMITTED"),
-      ), inventoryCommitted)
+      ), handoffFulfillment)
       .when(
         Condition.stringEquals("$.inventoryCommit.status", "RESERVATION_NOT_ACTIVE"),
         releaseExpiredInventory,
@@ -655,10 +845,11 @@ export class MarketplaceCheckoutStack extends Stack {
         capturePayment,
       )
       .otherwise(paymentAuthorized);
+    reserveFulfillment.next(fulfillmentCapacityOutcome);
     authorizePayment.next(new Choice(this, "PaymentAuthorizationOutcome")
       .when(
         Condition.stringEquals("$.paymentAuthorization.status", "AUTHORIZED"),
-        fulfillmentCapacityOutcome,
+        reserveFulfillment,
       )
       .when(Condition.stringEquals("$.paymentAuthorization.status", "REJECTED"), paymentRejected)
       .otherwise(new Fail(this, "PaymentAuthorizationRejected", {
@@ -708,9 +899,16 @@ export class MarketplaceCheckoutStack extends Stack {
         resources: [`${paymentFunction.functionArn}:*`],
       }),
     );
+    stateMachine.addToRolePolicy(
+      new PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [`${fulfillmentFunction.functionArn}:*`],
+      }),
+    );
 
     const workflowVersion = new CfnStateMachineVersion(this, "CheckoutWorkflowVersion", {
-      description: "Immutable marketplace checkout Order, Inventory, and Payment workflow.",
+      description:
+        "Immutable marketplace checkout Order, Inventory, Payment, and Fulfillment workflow.",
       stateMachineArn: stateMachine.stateMachineArn,
       stateMachineRevisionId: stateMachine.stateMachineRevisionId,
     });
@@ -806,6 +1004,15 @@ export class MarketplaceCheckoutStack extends Stack {
     new CfnOutput(this, "PaymentTableName", { value: paymentTable.tableName });
     new CfnOutput(this, "PaymentEventSource", { value: paymentEventSource });
     new CfnOutput(this, "PaymentCommandFunctionName", { value: paymentFunction.functionName });
+    new CfnOutput(this, "FulfillmentTableName", { value: fulfillmentTable.tableName });
+    new CfnOutput(this, "FulfillmentEventSource", { value: fulfillmentEventSource });
+    new CfnOutput(this, "FulfillmentCommandFunctionName", {
+      value: fulfillmentFunction.functionName,
+    });
+    new CfnOutput(this, "FulfillmentQueueUrl", { value: fulfillmentQueue.queueUrl });
+    new CfnOutput(this, "FulfillmentWorkerFunctionName", {
+      value: fulfillmentWorker.functionName,
+    });
     new CfnOutput(this, "FakePaymentProviderTableName", {
       value: fakePaymentProviderTable.tableName,
     });
@@ -824,6 +1031,7 @@ export class MarketplaceCheckoutStack extends Stack {
     entryFile: string,
     environment: Record<string, string>,
     timeout: Duration = Duration.seconds(10),
+    role?: Role,
   ): NodejsFunction {
     const functionName = `aws-architecture-lab-${id.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase()}`;
     const logGroup = new LogGroup(this, `${id}Logs`, {
@@ -831,7 +1039,7 @@ export class MarketplaceCheckoutStack extends Stack {
       retention: RetentionDays.ONE_WEEK,
       removalPolicy: RemovalPolicy.DESTROY,
     });
-    return new NodejsFunction(this, id, {
+    const fn = new NodejsFunction(this, id, {
       entry: repositoryPath("apps", "marketplace-checkout", "src", entryFile),
       runtime: Runtime.NODEJS_24_X,
       bundling: {
@@ -845,11 +1053,14 @@ export class MarketplaceCheckoutStack extends Stack {
       handler: "handler",
       logGroup,
       memorySize: 256,
+      ...(role === undefined ? {} : { role }),
       ...(this.lambdaReservedConcurrency === undefined
         ? {}
         : { reservedConcurrentExecutions: this.lambdaReservedConcurrency }),
       timeout,
     });
+    if (role !== undefined) logGroup.grantWrite(role);
+    return fn;
   }
 
   private addInternalCommandRetry(task: LambdaInvoke): void {

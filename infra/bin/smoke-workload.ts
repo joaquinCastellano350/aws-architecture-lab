@@ -18,6 +18,7 @@ await executeAsyncCli(async () => {
   const orderPendingEventType = stackOutput("OrderPendingEventType");
   const inventoryTableName = stackOutput("InventoryTableName");
   const paymentTableName = stackOutput("PaymentTableName");
+  const fulfillmentTableName = stackOutput("FulfillmentTableName");
   const idempotencyKey = `smoke-${Date.now()}`;
   const correlationId = `smoke-correlation-${Date.now()}`;
   const requestBody = JSON.stringify({
@@ -53,13 +54,20 @@ await executeAsyncCli(async () => {
       "GET",
       statusLocation,
     );
-    if (
-      observed.status === 200 &&
-      isRecord(observed.body) &&
-      observed.body.checkoutId === checkoutId &&
-      observed.body.status === "PENDING"
-    ) {
-      return observed;
+    if (observed.status === 200 && isRecord(observed.body)) {
+      if (
+        observed.body.checkoutId === checkoutId &&
+        observed.body.status === "CONFIRMED"
+      ) {
+        return observed;
+      }
+      if (
+        observed.body.checkoutId === checkoutId &&
+        observed.body.status === "PENDING"
+      ) {
+        return undefined;
+      }
+      throw new Error(`Checkout reached an unexpected terminal state: ${JSON.stringify(observed.body)}`);
     }
     if (observed.status !== 404) {
       throw new Error(`GET checkout status failed: ${observed.status} ${JSON.stringify(observed.body)}`);
@@ -67,11 +75,12 @@ await executeAsyncCli(async () => {
     return undefined;
   });
   if (status === undefined) {
-    throw new Error("Checkout did not expose a PENDING Order within 20 seconds.");
+    throw new Error("Checkout did not reach CONFIRMED within 20 seconds.");
   }
 
-  await waitForReservedInventory(inventoryTableName, checkoutId, 20_000);
-  await waitForPaymentAuthorization(paymentTableName, checkoutId, 20_000);
+  await waitForCommittedInventory(inventoryTableName, checkoutId, 20_000);
+  await waitForCapturedPayment(paymentTableName, checkoutId, 20_000);
+  await waitForFulfillmentHandoff(fulfillmentTableName, checkoutId, 20_000);
 
   const initialAudit = await waitForAuditedEvent(auditTableName, correlationId, 20_000);
   const eventId = stringAttribute(initialAudit, "eventId");
@@ -124,7 +133,7 @@ await executeAsyncCli(async () => {
   }
 
   console.log(
-    `Smoke passed for ${checkoutId}: POST 202, idempotent replay, GET PENDING, Inventory reserved, Payment authorized, transactional Order event observed, duplicate deduplicated, distinct event retained.`,
+    `Smoke passed for ${checkoutId}: POST 202, idempotent replay, GET CONFIRMED, Inventory committed, Payment captured, Fulfillment handed off, transactional Order event observed, duplicate deduplicated, distinct event retained.`,
   );
 });
 
@@ -257,7 +266,7 @@ function auditItem(tableName: string, eventId: string): Record<string, unknown> 
   return isRecord(response) && isRecord(response.Item) ? response.Item : undefined;
 }
 
-async function waitForReservedInventory(
+async function waitForCommittedInventory(
   tableName: string,
   checkoutId: string,
   timeoutMilliseconds: number,
@@ -275,14 +284,14 @@ async function waitForReservedInventory(
     ]);
     if (!isRecord(response) || !isRecord(response.Item)) return undefined;
     const status = response.Item.status;
-    return isRecord(status) && status.S === "RESERVED" ? true : undefined;
+    return isRecord(status) && status.S === "COMMITTED" ? true : undefined;
   });
   if (observed === undefined) {
-    throw new Error("Checkout Inventory reservation was not created within 20 seconds.");
+    throw new Error("Checkout Inventory was not committed within 20 seconds.");
   }
 }
 
-async function waitForPaymentAuthorization(
+async function waitForCapturedPayment(
   tableName: string,
   checkoutId: string,
   timeoutMilliseconds: number,
@@ -299,10 +308,35 @@ async function waitForPaymentAuthorization(
     ]);
     if (!isRecord(response) || !isRecord(response.Item)) return undefined;
     const status = response.Item.status;
-    return isRecord(status) && status.S === "AUTHORIZED" ? true : undefined;
+    return isRecord(status) && status.S === "CAPTURED" ? true : undefined;
   });
   if (observed === undefined) {
-    throw new Error("Checkout Payment was not authorized within 20 seconds.");
+    throw new Error("Checkout Payment was not captured within 20 seconds.");
+  }
+}
+
+async function waitForFulfillmentHandoff(
+  tableName: string,
+  checkoutId: string,
+  timeoutMilliseconds: number,
+): Promise<void> {
+  const reservationId = `fulfillment-${checkoutId}`;
+  const observed = await pollUntil(timeoutMilliseconds, () => {
+    const response = runAwsJson([
+      "dynamodb",
+      "get-item",
+      "--table-name",
+      tableName,
+      "--consistent-read",
+      "--key",
+      JSON.stringify({ recordKey: { S: `RESERVATION#${reservationId}` } }),
+    ]);
+    if (!isRecord(response) || !isRecord(response.Item)) return undefined;
+    const status = response.Item.status;
+    return isRecord(status) && status.S === "HANDED_OFF" ? true : undefined;
+  });
+  if (observed === undefined) {
+    throw new Error("Checkout Fulfillment was not handed off within 20 seconds.");
   }
 }
 

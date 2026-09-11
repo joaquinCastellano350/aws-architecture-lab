@@ -5,6 +5,8 @@ import {
   validateCreatePendingOrderOutcome,
   validateMarkOrderExpiredCommand,
   validateMarkOrderExpiredOutcome,
+  validateMarkOrderConfirmedCommand,
+  validateMarkOrderConfirmedOutcome,
   validateMarkOrderInventoryUnavailableCommand,
   validateMarkOrderInventoryUnavailableOutcome,
 } from "./generated/order-command.js";
@@ -66,6 +68,23 @@ describe("Order command JSON schemas", () => {
       checkoutId: "checkout-123",
       correlationId: "corr-123",
       status: "EXPIRED",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the typed Order confirmation command and outcome", () => {
+    expect(validateMarkOrderConfirmedCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderConfirmed",
+      operationId: "confirm-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "fulfillment-handoff-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderConfirmedOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "CONFIRMED",
     }).ok).toBe(true);
   });
 

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:order:mark-confirmed-command:v1",
+  "title": "MarkOrderConfirmedCommand",
+  "type": "object",
+  "required": ["schemaVersion", "commandType", "operationId", "checkoutId", "correlationId", "causationId"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "commandType": { "type": "string", "const": "MarkOrderConfirmed" },
+    "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "causationId": { "type": "string", "minLength": 1, "maxLength": 256 }
+  },
+  "additionalProperties": true
+}

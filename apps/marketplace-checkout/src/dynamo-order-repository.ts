@@ -9,11 +9,14 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import type {
   CreatePendingOrderCommand,
+  MarkOrderConfirmedCommand,
+  MarkOrderConfirmedOutcome,
   MarkOrderExpiredCommand,
   MarkOrderExpiredOutcome,
   MarkOrderInventoryUnavailableCommand,
   MarkOrderInventoryUnavailableOutcome,
   OrderExpiredEvent,
+  OrderConfirmedEvent,
   OrderInventoryUnavailableEvent,
   OrderPendingEvent,
 } from "@aws-architecture-lab/contracts";
@@ -121,9 +124,33 @@ export async function markOrderExpired(
   ) as Promise<MarkOrderExpiredOutcome>;
 }
 
-type TerminalOrderCommand = MarkOrderInventoryUnavailableCommand | MarkOrderExpiredCommand;
-type TerminalOrderOutcome = MarkOrderInventoryUnavailableOutcome | MarkOrderExpiredOutcome;
-type TerminalOrderEvent = OrderInventoryUnavailableEvent | OrderExpiredEvent;
+export async function markOrderConfirmed(
+  orderTableName: string,
+  outboxTableName: string,
+  input: MarkOrderConfirmedCommand,
+  dependencies: OrderRepositoryDependencies = {},
+): Promise<MarkOrderConfirmedOutcome> {
+  return markOrderTerminal(
+    orderTableName,
+    outboxTableName,
+    input,
+    "CONFIRMED",
+    dependencies,
+  ) as Promise<MarkOrderConfirmedOutcome>;
+}
+
+type TerminalOrderCommand =
+  | MarkOrderInventoryUnavailableCommand
+  | MarkOrderExpiredCommand
+  | MarkOrderConfirmedCommand;
+type TerminalOrderOutcome =
+  | MarkOrderInventoryUnavailableOutcome
+  | MarkOrderExpiredOutcome
+  | MarkOrderConfirmedOutcome;
+type TerminalOrderEvent =
+  | OrderInventoryUnavailableEvent
+  | OrderExpiredEvent
+  | OrderConfirmedEvent;
 
 async function markOrderTerminal(
   orderTableName: string,
@@ -140,7 +167,11 @@ async function markOrderTerminal(
     correlationId: input.correlationId,
     status,
   };
-  const eventType = status === "EXPIRED" ? "OrderExpired" : "OrderInventoryUnavailable";
+  const eventType = status === "EXPIRED"
+    ? "OrderExpired"
+    : status === "CONFIRMED"
+      ? "OrderConfirmed"
+      : "OrderInventoryUnavailable";
   const event = {
     eventId,
     eventType,

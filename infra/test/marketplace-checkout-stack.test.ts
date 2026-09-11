@@ -10,6 +10,72 @@ import {
 const template = workloadTemplate();
 
 describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
+  it("completes Fulfillment through an encrypted, token-protected callback", () => {
+    const functionEntries = Object.entries(template.findResources("AWS::Lambda::Function"));
+    const functions = functionEntries.map(([, resource]) => resource);
+    const fulfillmentCommand = functions.find((fn) =>
+      fn.Properties?.Environment?.Variables?.FULFILLMENT_TABLE_NAME !== undefined &&
+      fn.Properties?.Environment?.Variables?.FULFILLMENT_OUTBOX_TABLE_NAME !== undefined &&
+      fn.Properties?.FunctionName === "aws-architecture-lab-fulfillment-command"
+    );
+    const fulfillmentWorkerEntry = functionEntries.find(([, fn]) =>
+      fn.Properties?.FunctionName === "aws-architecture-lab-fulfillment-worker"
+    );
+    const fulfillmentWorker = fulfillmentWorkerEntry?.[1];
+    expect(fulfillmentCommand).toBeDefined();
+    expect(fulfillmentWorker).toBeDefined();
+
+    template.hasResourceProperties("AWS::SQS::Queue", {
+      SqsManagedSseEnabled: true,
+      VisibilityTimeout: 60,
+    });
+    template.hasResourceProperties("AWS::Lambda::EventSourceMapping", {
+      BatchSize: 10,
+      FunctionResponseTypes: ["ReportBatchItemFailures"],
+    });
+
+    const definition = JSON.stringify(
+      Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
+    );
+    const reserve = definition.indexOf("ReserveFulfillment");
+    const capture = definition.indexOf("CapturePayment");
+    const commit = definition.indexOf("CommitInventory");
+    const handoff = definition.indexOf("HandoffFulfillment");
+    const confirm = definition.indexOf("MarkOrderConfirmed");
+    expect(reserve).toBeGreaterThan(-1);
+    expect(capture).toBeGreaterThan(reserve);
+    expect(commit).toBeGreaterThan(capture);
+    expect(handoff).toBeGreaterThan(commit);
+    expect(confirm).toBeGreaterThan(handoff);
+    expect(definition).toContain("states:::sqs:sendMessage.waitForTaskToken");
+    expect(definition).toContain("$$.Task.Token");
+    expect(definition).toContain("HeartbeatSeconds");
+    expect(definition).toContain("60");
+    expect(definition).toContain("TimeoutSeconds");
+    expect(definition).toContain("300");
+    expect(definition).not.toContain("MessageAttributes");
+
+    const workerRoleId = fulfillmentWorker?.Properties?.Role?.["Fn::GetAtt"]?.[0];
+    const workerPolicies = Object.values(template.findResources("AWS::IAM::Policy"))
+      .filter((policy) => JSON.stringify(policy.Properties?.Roles).includes(workerRoleId));
+    const workerPolicyJson = JSON.stringify(workerPolicies);
+    expect(workerPolicyJson).toContain("states:SendTaskHeartbeat");
+    expect(workerPolicyJson).toContain("states:SendTaskSuccess");
+    expect(workerPolicyJson).toContain("states:SendTaskFailure");
+    expect(workerPolicyJson).not.toContain("states:StartExecution");
+    expect(workerPolicyJson).toContain("lambda:InvokeFunction");
+    expect(workerPolicyJson).not.toContain("dynamodb:");
+
+    const fulfillmentWorkerVersionEntry = Object.entries(
+      template.findResources("AWS::Lambda::Version"),
+    ).find(([, version]) =>
+      version.Properties?.FunctionName?.Ref === fulfillmentWorkerEntry?.[0]
+    );
+    expect(fulfillmentWorkerVersionEntry).toBeDefined();
+    expect(JSON.stringify(template.findResources("AWS::Lambda::EventSourceMapping")))
+      .toContain(fulfillmentWorkerVersionEntry?.[0]);
+  });
+
   it("authorizes and conditionally captures Payment through separately owned durable capabilities", () => {
     const functions = Object.values(template.findResources("AWS::Lambda::Function"));
     const paymentFunction = functions.find((fn) =>
@@ -26,12 +92,12 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     )).toBe(true);
 
     const tables = Object.values(template.findResources("AWS::DynamoDB::Table"));
-    expect(tables).toHaveLength(10);
+    expect(tables).toHaveLength(12);
     expect(tables.filter((table) =>
       JSON.stringify(table.Properties?.KeySchema) === JSON.stringify([
         { AttributeName: "recordKey", KeyType: "HASH" },
       ])
-    )).toHaveLength(5);
+    )).toHaveLength(6);
 
     const definition = JSON.stringify(
       Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
@@ -62,7 +128,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
 
   it("omits the failure-plan control plane from production-reference synthesis", () => {
     const productionReference = workloadTemplate({ enableFakePaymentFailurePlans: false });
-    productionReference.resourceCountIs("AWS::DynamoDB::Table", 9);
+    productionReference.resourceCountIs("AWS::DynamoDB::Table", 11);
     const policies = JSON.stringify(productionReference.findResources("AWS::IAM::Policy"));
     expect(policies).not.toContain("FAILURE_PLAN#*");
     const functions = Object.values(productionReference.findResources("AWS::Lambda::Function"));
@@ -96,7 +162,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
   });
 
   it("gives Order and Saga Execution separately owned durable records", () => {
-    template.resourceCountIs("AWS::DynamoDB::Table", 10);
+    template.resourceCountIs("AWS::DynamoDB::Table", 12);
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       KeySchema: [{ AttributeName: "checkoutId", KeyType: "HASH" }],
       SSESpecification: { SSEEnabled: true },
@@ -114,7 +180,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     });
 
     const tables = Object.values(template.findResources("AWS::DynamoDB::Table"));
-    expect(tables).toHaveLength(10);
+    expect(tables).toHaveLength(12);
     for (const table of tables) {
       expect(table.DeletionPolicy).toBe("Delete");
       expect(table.UpdateReplacePolicy).toBe("Delete");
@@ -181,7 +247,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
       },
     });
     template.resourceCountIs("AWS::StepFunctions::StateMachineVersion", 1);
-    template.resourceCountIs("AWS::Lambda::Version", 3);
+    template.resourceCountIs("AWS::Lambda::Version", 5);
     template.hasResourceProperties("AWS::StepFunctions::StateMachineAlias", {
       Name: "LIVE",
       RoutingConfiguration: [
@@ -204,7 +270,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
 
     for (const resourceType of ["AWS::StepFunctions::StateMachineVersion", "AWS::Lambda::Version"]) {
       const versions = Object.values(template.findResources(resourceType));
-      expect(versions).toHaveLength(resourceType === "AWS::Lambda::Version" ? 3 : 1);
+      expect(versions).toHaveLength(resourceType === "AWS::Lambda::Version" ? 5 : 1);
       expect(versions[0]?.UpdateReplacePolicy).toBe("Retain");
       expect(versions[0]?.DeletionPolicy).toBe("Retain");
     }
@@ -248,7 +314,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     expect(definition).toContain("RESERVED");
     expect(definition).toContain("OUT_OF_STOCK");
     expect(definition).toContain("CommitInventory");
-    expect(definition).toContain("InventoryCommitted");
+    expect(definition).toContain("InventoryCommitOutcome");
     expect(definition).toContain("MarkOrderInventoryUnavailable");
     expect(definition).toContain("INVENTORY_UNAVAILABLE");
     expect(definition).toContain("TransactionConflictException");
@@ -364,7 +430,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     });
 
     const functions = Object.values(template.findResources("AWS::Lambda::Function"));
-    expect(functions).toHaveLength(10);
+    expect(functions).toHaveLength(13);
     for (const fn of functions) {
       expect(fn.Properties?.ReservedConcurrentExecutions).toBeUndefined();
     }
@@ -376,7 +442,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
       const configuredTemplate = workloadTemplate({ lambdaReservedConcurrency: 3 });
       const functions = Object.values(configuredTemplate.findResources("AWS::Lambda::Function"));
 
-      expect(functions).toHaveLength(10);
+      expect(functions).toHaveLength(13);
       for (const fn of functions) {
         expect(fn.Properties?.ReservedConcurrentExecutions).toBe(3);
       }

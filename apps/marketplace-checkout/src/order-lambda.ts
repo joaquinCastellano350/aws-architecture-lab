@@ -1,15 +1,18 @@
 import type { Handler } from "aws-lambda";
 import {
   validateCreatePendingOrderCommand,
+  validateMarkOrderConfirmedCommand,
   validateMarkOrderExpiredCommand,
   validateMarkOrderInventoryUnavailableCommand,
   type CreatePendingOrderOutcome,
+  type MarkOrderConfirmedOutcome,
   type MarkOrderExpiredOutcome,
   type MarkOrderInventoryUnavailableOutcome,
 } from "@aws-architecture-lab/contracts";
 
 import {
   createPendingOrder,
+  markOrderConfirmed,
   markOrderExpired,
   markOrderInventoryUnavailable,
 } from "./dynamo-order-repository.js";
@@ -21,8 +24,16 @@ const outboxTableName = requiredEnvironment("ORDER_OUTBOX_TABLE_NAME");
 
 export const handler: Handler<
   unknown,
-  CreatePendingOrderOutcome | MarkOrderInventoryUnavailableOutcome | MarkOrderExpiredOutcome
+  | CreatePendingOrderOutcome
+  | MarkOrderInventoryUnavailableOutcome
+  | MarkOrderExpiredOutcome
+  | MarkOrderConfirmedOutcome
 > = async (event) => {
+  if (commandTypeOf(event) === "MarkOrderConfirmed") {
+    const validation = validateMarkOrderConfirmedCommand(event);
+    if (!validation.ok) throw new Error(validation.error);
+    return markOrderConfirmed(orderTableName, outboxTableName, validation.value);
+  }
   if (commandTypeOf(event) === "MarkOrderExpired") {
     const validation = validateMarkOrderExpiredCommand(event);
     if (!validation.ok) throw new Error(validation.error);

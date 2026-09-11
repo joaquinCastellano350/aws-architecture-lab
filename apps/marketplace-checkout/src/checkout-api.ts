@@ -52,7 +52,7 @@ export interface SagaExecution {
 export interface Order {
   readonly checkoutId: string;
   readonly correlationId: string;
-  readonly status: "PENDING" | "INVENTORY_UNAVAILABLE" | "EXPIRED";
+  readonly status: "PENDING" | "INVENTORY_UNAVAILABLE" | "EXPIRED" | "CONFIRMED";
   readonly createdAt: string;
   readonly updatedAt: string;
 }
