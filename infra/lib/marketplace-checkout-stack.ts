@@ -27,7 +27,12 @@ import {
 } from "aws-cdk-lib/aws-dynamodb";
 import { EventBus, Rule, Schedule } from "aws-cdk-lib/aws-events";
 import { LambdaFunction as EventBridgeLambdaFunction } from "aws-cdk-lib/aws-events-targets";
-import { PolicyStatement, ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import {
+  AccountPrincipal,
+  PolicyStatement,
+  Role,
+  ServicePrincipal,
+} from "aws-cdk-lib/aws-iam";
 import { CfnVersion, Runtime, StartingPosition, type IFunction } from "aws-cdk-lib/aws-lambda";
 import { DynamoEventSource, SqsDlq } from "aws-cdk-lib/aws-lambda-event-sources";
 import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
@@ -57,8 +62,10 @@ const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const orderEventSource = "aws-architecture-lab.order";
 const orderPendingEventType = "OrderPending";
 const inventoryEventSource = "aws-architecture-lab.inventory";
+const paymentEventSource = "aws-architecture-lab.payment";
 
 export interface MarketplaceCheckoutStackProps extends StackProps {
+  readonly enableFakePaymentFailurePlans?: boolean;
   readonly lambdaReservedConcurrency?: number;
 }
 
@@ -66,7 +73,11 @@ export class MarketplaceCheckoutStack extends Stack {
   private readonly lambdaReservedConcurrency: number | undefined;
 
   public constructor(scope: Construct, id: string, props: MarketplaceCheckoutStackProps = {}) {
-    const { lambdaReservedConcurrency, ...stackProps } = props;
+    const {
+      enableFakePaymentFailurePlans = true,
+      lambdaReservedConcurrency,
+      ...stackProps
+    } = props;
     super(scope, id, stackProps);
 
     if (
@@ -140,6 +151,62 @@ export class MarketplaceCheckoutStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
       stream: StreamViewType.NEW_IMAGE,
     });
+    const paymentTable = new Table(this, "Payments", {
+      partitionKey: { name: "recordKey", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const paymentOutboxTable = new Table(this, "PaymentOutbox", {
+      partitionKey: { name: "eventId", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+      stream: StreamViewType.NEW_IMAGE,
+    });
+    const fakePaymentProviderTable = new Table(this, "FakePaymentProvider", {
+      partitionKey: { name: "recordKey", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const fakePaymentFailurePlanTable = enableFakePaymentFailurePlans
+      ? new Table(this, "FakePaymentFailurePlans", {
+          partitionKey: { name: "recordKey", type: AttributeType.STRING },
+          billingMode: BillingMode.PAY_PER_REQUEST,
+          encryption: TableEncryption.AWS_MANAGED,
+          maxReadRequestUnits: 100,
+          maxWriteRequestUnits: 100,
+          removalPolicy: RemovalPolicy.DESTROY,
+        })
+      : undefined;
+    let fakePaymentFailurePlanRole: Role | undefined;
+    if (fakePaymentFailurePlanTable !== undefined) {
+      fakePaymentFailurePlanRole = new Role(this, "FakePaymentFailurePlanRole", {
+        assumedBy: new AccountPrincipal(Aws.ACCOUNT_ID),
+        description: "Narrow sandbox role for deterministic Payment provider failure plans.",
+      });
+      fakePaymentFailurePlanRole.addToPolicy(new PolicyStatement({
+        actions: [
+          "dynamodb:DeleteItem",
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+        ],
+        resources: [fakePaymentFailurePlanTable.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": {
+            "dynamodb:LeadingKeys": ["FAILURE_PLAN#*"],
+          },
+        },
+      }));
+    }
     const eventBus = new EventBus(this, "CheckoutEvents", {
       eventBusName: "aws-architecture-lab-marketplace-checkout",
     });
@@ -186,6 +253,29 @@ export class MarketplaceCheckoutStack extends Stack {
       startingPosition: StartingPosition.LATEST,
     }));
     eventBus.grantPutEventsTo(inventoryOutboxPublisher);
+
+    const failedPaymentOutboxRecords = new Queue(this, "PaymentOutboxFailureDestination", {
+      encryption: QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(4),
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const paymentOutboxPublisher = this.lambdaFunction(
+      "PaymentOutboxPublisher",
+      "outbox-publisher.ts",
+      {
+        EVENT_BUS_NAME: eventBus.eventBusName,
+        EVENT_SOURCE: paymentEventSource,
+      },
+    );
+    paymentOutboxPublisher.addEventSource(new DynamoEventSource(paymentOutboxTable as ITable, {
+      batchSize: 10,
+      bisectBatchOnError: true,
+      onFailure: new SqsDlq(failedPaymentOutboxRecords),
+      reportBatchItemFailures: true,
+      retryAttempts: 3,
+      startingPosition: StartingPosition.LATEST,
+    }));
+    eventBus.grantPutEventsTo(paymentOutboxPublisher);
 
     const auditConsumer = this.lambdaFunction("OrderAuditConsumer", "audit-consumer.ts", {
       AUDIT_TABLE_NAME: auditTable.tableName,
@@ -242,6 +332,35 @@ export class MarketplaceCheckoutStack extends Stack {
     const inventoryFunctionVersion = inventoryFunction.currentVersion;
     const cfnInventoryFunctionVersion = inventoryFunctionVersion.node.defaultChild as CfnVersion;
     retainAcrossDeployments(cfnInventoryFunctionVersion);
+
+    const paymentFunction = this.lambdaFunction(
+      "PaymentCommand",
+      "payment-lambda.ts",
+      {
+        FAKE_PAYMENT_PROVIDER_TABLE_NAME: fakePaymentProviderTable.tableName,
+        ...(fakePaymentFailurePlanTable === undefined
+          ? {}
+          : { FAKE_PAYMENT_FAILURE_PLAN_TABLE_NAME: fakePaymentFailurePlanTable.tableName }),
+        PAYMENT_OUTBOX_TABLE_NAME: paymentOutboxTable.tableName,
+        PAYMENT_TABLE_NAME: paymentTable.tableName,
+      },
+      Duration.seconds(10),
+    );
+    paymentTable.grantReadWriteData(paymentFunction);
+    paymentOutboxTable.grantWriteData(paymentFunction);
+    fakePaymentProviderTable.grantReadWriteData(paymentFunction);
+    fakePaymentFailurePlanTable?.grantReadData(paymentFunction);
+    paymentFunction.addToRolePolicy(new PolicyStatement({
+      actions: ["dynamodb:TransactWriteItems"],
+      resources: [
+        paymentTable.tableArn,
+        paymentOutboxTable.tableArn,
+        fakePaymentProviderTable.tableArn,
+      ],
+    }));
+    const paymentFunctionVersion = paymentFunction.currentVersion;
+    const cfnPaymentFunctionVersion = paymentFunctionVersion.node.defaultChild as CfnVersion;
+    retainAcrossDeployments(cfnPaymentFunctionVersion);
 
     const inventoryExpiryWorker = this.lambdaFunction(
       "InventoryExpiryWorker",
@@ -364,6 +483,40 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(commitInventory);
+    const authorizePayment = new LambdaInvoke(this, "AuthorizePayment", {
+      lambdaFunction: paymentFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "AuthorizePayment",
+        operationId: JsonPath.format("authorize-{}", JsonPath.stringAt("$.checkoutId")),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        paymentId: JsonPath.format("payment-{}", JsonPath.stringAt("$.checkoutId")),
+        amountMinor: 1250,
+        currency: "USD",
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.paymentAuthorization",
+      retryOnServiceExceptions: false,
+    });
+    this.addPaymentCommandRetry(authorizePayment);
+    const capturePayment = new LambdaInvoke(this, "CapturePayment", {
+      lambdaFunction: paymentFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "CapturePayment",
+        operationId: JsonPath.format("capture-{}", JsonPath.stringAt("$.checkoutId")),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        paymentId: JsonPath.stringAt("$.paymentAuthorization.paymentId"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.paymentCapture",
+      retryOnServiceExceptions: false,
+    });
+    this.addPaymentCommandRetry(capturePayment);
     const releaseExpiredInventory = new LambdaInvoke(this, "ReleaseExpiredInventory", {
       lambdaFunction: inventoryFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
@@ -383,6 +536,8 @@ export class MarketplaceCheckoutStack extends Stack {
     this.addInternalCommandRetry(releaseExpiredInventory);
     const inventoryCommitted = new Succeed(this, "InventoryCommitted");
     const inventoryUnavailable = new Succeed(this, "InventoryUnavailable");
+    const paymentAuthorized = new Succeed(this, "PaymentAuthorized");
+    const paymentRejected = new Succeed(this, "PaymentRejected");
     const markOrderInventoryUnavailable = new LambdaInvoke(this, "MarkOrderInventoryUnavailable", {
       lambdaFunction: orderFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
@@ -488,10 +643,32 @@ export class MarketplaceCheckoutStack extends Stack {
     const inventoryCommitTiming = new Choice(this, "InventoryCommitTiming")
       .when(Condition.isPresent("$.inventoryCommitAt"), waitUntilInventoryCommit)
       .otherwise(reservationDeadlineReached);
+    capturePayment.next(new Choice(this, "PaymentCaptureOutcome")
+      .when(Condition.stringEquals("$.paymentCapture.status", "CAPTURED"), inventoryCommitTiming)
+      .otherwise(new Fail(this, "PaymentCaptureRejected", {
+        cause: "Payment returned an unsupported capture outcome.",
+        error: "PaymentCaptureFailure",
+      })));
+    const fulfillmentCapacityOutcome = new Choice(this, "FulfillmentCapacityOutcome")
+      .when(
+        Condition.stringEquals("$.fulfillmentReservation.status", "RESERVED"),
+        capturePayment,
+      )
+      .otherwise(paymentAuthorized);
+    authorizePayment.next(new Choice(this, "PaymentAuthorizationOutcome")
+      .when(
+        Condition.stringEquals("$.paymentAuthorization.status", "AUTHORIZED"),
+        fulfillmentCapacityOutcome,
+      )
+      .when(Condition.stringEquals("$.paymentAuthorization.status", "REJECTED"), paymentRejected)
+      .otherwise(new Fail(this, "PaymentAuthorizationRejected", {
+        cause: "Payment returned an unsupported authorization outcome.",
+        error: "PaymentAuthorizationFailure",
+      })));
     reserveInventory.next(new Choice(this, "InventoryReservationOutcome")
       .when(
         Condition.stringEquals("$.inventoryReservation.status", "RESERVED"),
-        inventoryCommitTiming,
+        authorizePayment,
       )
       .when(
         Condition.stringEquals("$.inventoryReservation.status", "OUT_OF_STOCK"),
@@ -525,9 +702,15 @@ export class MarketplaceCheckoutStack extends Stack {
         resources: [`${inventoryFunction.functionArn}:*`],
       }),
     );
+    stateMachine.addToRolePolicy(
+      new PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [`${paymentFunction.functionArn}:*`],
+      }),
+    );
 
     const workflowVersion = new CfnStateMachineVersion(this, "CheckoutWorkflowVersion", {
-      description: "Immutable marketplace checkout Order and Inventory workflow.",
+      description: "Immutable marketplace checkout Order, Inventory, and Payment workflow.",
       stateMachineArn: stateMachine.stateMachineArn,
       stateMachineRevisionId: stateMachine.stateMachineRevisionId,
     });
@@ -620,6 +803,20 @@ export class MarketplaceCheckoutStack extends Stack {
     new CfnOutput(this, "InventoryExpiryWorkerFunctionName", {
       value: inventoryExpiryWorker.functionName,
     });
+    new CfnOutput(this, "PaymentTableName", { value: paymentTable.tableName });
+    new CfnOutput(this, "PaymentEventSource", { value: paymentEventSource });
+    new CfnOutput(this, "PaymentCommandFunctionName", { value: paymentFunction.functionName });
+    new CfnOutput(this, "FakePaymentProviderTableName", {
+      value: fakePaymentProviderTable.tableName,
+    });
+    if (fakePaymentFailurePlanRole !== undefined && fakePaymentFailurePlanTable !== undefined) {
+      new CfnOutput(this, "FakePaymentFailurePlanTableName", {
+        value: fakePaymentFailurePlanTable.tableName,
+      });
+      new CfnOutput(this, "FakePaymentFailurePlanRoleArn", {
+        value: fakePaymentFailurePlanRole.roleArn,
+      });
+    }
   }
 
   private lambdaFunction(
@@ -666,6 +863,28 @@ export class MarketplaceCheckoutStack extends Stack {
         "ProvisionedThroughputExceededException",
         "ThrottlingException",
         "InternalServerError",
+      ],
+      interval: Duration.seconds(1),
+      maxAttempts: 2,
+      backoffRate: 2,
+      jitterStrategy: JitterType.FULL,
+    });
+  }
+
+  private addPaymentCommandRetry(task: LambdaInvoke): void {
+    task.addRetry({
+      errors: [
+        "Lambda.ServiceException",
+        "Lambda.AWSLambdaException",
+        "Lambda.SdkClientException",
+        "TransactionCanceledException",
+        "TransactionConflictException",
+        "ProvisionedThroughputExceededException",
+        "ThrottlingException",
+        "InternalServerError",
+        "PaymentProviderThrottledError",
+        "PaymentProviderTimeoutError",
+        "PaymentProviderResponseLostError",
       ],
       interval: Duration.seconds(1),
       maxAttempts: 2,

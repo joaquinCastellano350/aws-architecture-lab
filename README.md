@@ -98,9 +98,23 @@ The first ephemeral workload exposes the OpenAPI-defined `POST /checkouts` and
 `GET /checkouts/{checkoutId}` operations. Both require IAM/SigV4. Submission is
 asynchronous: a successful POST returns `202 Accepted` and a status location while a
 Step Functions Standard execution, admitted through the `LIVE` alias, creates the
-customer-visible pending Order, reserves Inventory without overselling, and commits the
-reservation. Optional additive `itemId` and `quantity` request fields select stock; older
-v1 clients use the deterministic lab item and a quantity of one.
+customer-visible pending Order, reserves Inventory without overselling, and authorizes a
+manual-capture Payment through a provider-neutral capability. Optional additive `itemId`
+and `quantity` request fields select stock; older v1 clients use the deterministic lab item
+and a quantity of one.
+
+The Payment capability owns a durable operation ledger and transactional outbox. Its
+deterministic fake provider persists separate provider state and uses semantic keys for
+authorize, capture, cancel, and refund, so repeated requests preserve one economic result.
+Sandbox failure plans are durable records in a dedicated table under the `FAILURE_PLAN#`
+key namespace. They can be changed only through the output
+`FakePaymentFailurePlanRoleArn`; the Payment Lambda has read-only access and consumes them
+to model rejection, throttling, timeout, and commit-then-response-loss. Production-reference
+synthesis disables this test control plane with `enableFakePaymentFailurePlans: false`.
+The workflow contains the capture path but will enter it only after a typed
+`fulfillmentReservation.status = RESERVED` outcome. The normal API path intentionally
+stops at `PaymentAuthorized` until Issue #8 installs the real SQS-backed Fulfillment
+capacity/callback step; it does not invent a capacity reservation.
 
 The OpenAPI 2.0 contract adds the `EXPIRED` customer outcome while continuing to accept the
 existing v1 submission schema. Reservations carry a five-minute business deadline. The
@@ -124,7 +138,8 @@ npm run workload:destroy
 
 The smoke command signs real API requests with the active AWS credentials, repeats the
 POST to prove idempotent admission, polls GET until the pending Order is visible, and
-verifies that its Inventory reservation reaches `COMMITTED`. It then waits for the
+verifies that its Inventory reservation reaches `RESERVED` and Payment reaches
+`AUTHORIZED`. It then waits for the
 committed `OrderPending` fact in the audit table, republishes that
 event alongside a distinct event, and proves the audit consumer deduplicates the replay
 without dropping the distinct fact. Destroy removes the ephemeral workload and verifies

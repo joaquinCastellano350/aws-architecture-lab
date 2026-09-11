@@ -5,10 +5,12 @@ import {
   validateOrderExpiredEvent,
   validateOrderInventoryUnavailableEvent,
   validateOrderPendingEvent,
+  validatePaymentEvent,
   type InventoryEvent,
   type OrderExpiredEvent,
   type OrderInventoryUnavailableEvent,
   type OrderPendingEvent,
+  type PaymentEvent,
 } from "@aws-architecture-lab/contracts";
 import type {
   DynamoDBBatchResponse,
@@ -24,7 +26,12 @@ export interface OutboxPublisherDependencies {
   readonly eventSource: string;
 }
 
-type DomainEvent = InventoryEvent | OrderExpiredEvent | OrderInventoryUnavailableEvent | OrderPendingEvent;
+type DomainEvent =
+  | InventoryEvent
+  | OrderExpiredEvent
+  | OrderInventoryUnavailableEvent
+  | OrderPendingEvent
+  | PaymentEvent;
 
 export function createOutboxPublisher(dependencies: OutboxPublisherDependencies) {
   return async (input: DynamoDBStreamEvent): Promise<DynamoDBBatchResponse> => {
@@ -102,5 +109,6 @@ function validateDomainEvent(
     return unavailable.ok ? unavailable : validateOrderExpiredEvent(input);
   }
   if (eventSource === "aws-architecture-lab.inventory") return validateInventoryEvent(input);
+  if (eventSource === "aws-architecture-lab.payment") return validatePaymentEvent(input);
   return { ok: false };
 }

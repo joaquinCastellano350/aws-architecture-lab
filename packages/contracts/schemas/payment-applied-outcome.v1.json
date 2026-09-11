@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:payment:applied-outcome:v1",
+  "title": "PaymentAppliedOutcome",
+  "type": "object",
+  "required": ["schemaVersion", "operationId", "checkoutId", "paymentId", "status", "providerReference"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "paymentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "status": { "type": "string", "enum": ["AUTHORIZED", "CAPTURED", "CANCELLED", "REFUNDED"] },
+    "providerReference": { "type": "string", "minLength": 1, "maxLength": 256 }
+  },
+  "additionalProperties": true
+}

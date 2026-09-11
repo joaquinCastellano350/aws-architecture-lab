@@ -17,6 +17,7 @@ await executeAsyncCli(async () => {
   const eventSource = stackOutput("OrderEventSource");
   const orderPendingEventType = stackOutput("OrderPendingEventType");
   const inventoryTableName = stackOutput("InventoryTableName");
+  const paymentTableName = stackOutput("PaymentTableName");
   const idempotencyKey = `smoke-${Date.now()}`;
   const correlationId = `smoke-correlation-${Date.now()}`;
   const requestBody = JSON.stringify({
@@ -69,7 +70,8 @@ await executeAsyncCli(async () => {
     throw new Error("Checkout did not expose a PENDING Order within 20 seconds.");
   }
 
-  await waitForCommittedInventory(inventoryTableName, checkoutId, 20_000);
+  await waitForReservedInventory(inventoryTableName, checkoutId, 20_000);
+  await waitForPaymentAuthorization(paymentTableName, checkoutId, 20_000);
 
   const initialAudit = await waitForAuditedEvent(auditTableName, correlationId, 20_000);
   const eventId = stringAttribute(initialAudit, "eventId");
@@ -122,7 +124,7 @@ await executeAsyncCli(async () => {
   }
 
   console.log(
-    `Smoke passed for ${checkoutId}: POST 202, idempotent replay, GET PENDING, Inventory committed, transactional Order event observed, duplicate deduplicated, distinct event retained.`,
+    `Smoke passed for ${checkoutId}: POST 202, idempotent replay, GET PENDING, Inventory reserved, Payment authorized, transactional Order event observed, duplicate deduplicated, distinct event retained.`,
   );
 });
 
@@ -255,7 +257,7 @@ function auditItem(tableName: string, eventId: string): Record<string, unknown> 
   return isRecord(response) && isRecord(response.Item) ? response.Item : undefined;
 }
 
-async function waitForCommittedInventory(
+async function waitForReservedInventory(
   tableName: string,
   checkoutId: string,
   timeoutMilliseconds: number,
@@ -273,10 +275,34 @@ async function waitForCommittedInventory(
     ]);
     if (!isRecord(response) || !isRecord(response.Item)) return undefined;
     const status = response.Item.status;
-    return isRecord(status) && status.S === "COMMITTED" ? true : undefined;
+    return isRecord(status) && status.S === "RESERVED" ? true : undefined;
   });
   if (observed === undefined) {
-    throw new Error("Checkout Inventory reservation was not committed within 20 seconds.");
+    throw new Error("Checkout Inventory reservation was not created within 20 seconds.");
+  }
+}
+
+async function waitForPaymentAuthorization(
+  tableName: string,
+  checkoutId: string,
+  timeoutMilliseconds: number,
+): Promise<void> {
+  const observed = await pollUntil(timeoutMilliseconds, () => {
+    const response = runAwsJson([
+      "dynamodb",
+      "get-item",
+      "--table-name",
+      tableName,
+      "--consistent-read",
+      "--key",
+      JSON.stringify({ recordKey: { S: `PAYMENT#payment-${checkoutId}` } }),
+    ]);
+    if (!isRecord(response) || !isRecord(response.Item)) return undefined;
+    const status = response.Item.status;
+    return isRecord(status) && status.S === "AUTHORIZED" ? true : undefined;
+  });
+  if (observed === undefined) {
+    throw new Error("Checkout Payment was not authorized within 20 seconds.");
   }
 }
 

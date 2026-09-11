@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "generate": "node scripts/generate-checkout-api.mjs && node scripts/generate-order-command.mjs && node scripts/generate-order-event.mjs && node scripts/generate-inventory-command.mjs && node scripts/generate-inventory-event.mjs",
+    "generate": "node scripts/generate-checkout-api.mjs && node scripts/generate-order-command.mjs && node scripts/generate-order-event.mjs && node scripts/generate-inventory-command.mjs && node scripts/generate-inventory-event.mjs && node scripts/generate-payment-command.mjs && node scripts/generate-payment-event.mjs",
     "build": "npm run generate && tsc -b",
     "clean": "tsc -b --clean",
     "test": "npm run generate && vitest run --passWithNoTests",

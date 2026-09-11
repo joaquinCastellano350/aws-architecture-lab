@@ -92,6 +92,28 @@ describe("domain outbox publisher", () => {
     }));
   });
 
+  it("publishes versioned Payment facts from the Payment outbox", async () => {
+    const sent: PutEventsCommand[] = [];
+    const eventBridge = {
+      async send(command: PutEventsCommand) {
+        sent.push(command);
+        return { Entries: [{ EventId: "eventbridge-payment" }] };
+      },
+    } as unknown as EventBridgeClient;
+    const publish = createOutboxPublisher({
+      eventBridge,
+      eventBusName: "checkout-events",
+      eventSource: "aws-architecture-lab.payment",
+    });
+
+    await expect(publish({ Records: [streamRecord("payment-stream", paymentEvent())] }))
+      .resolves.toEqual({ batchItemFailures: [] });
+    expect(sent[0]?.input.Entries?.[0]).toEqual(expect.objectContaining({
+      Source: "aws-architecture-lab.payment",
+      DetailType: "PaymentCaptured",
+    }));
+  });
+
   it("reports malformed records for retry without publishing them", async () => {
     const eventBridge = {
       async send() {
@@ -154,6 +176,25 @@ function inventoryEvent() {
       quantity: 1,
       status: "RESERVED",
       expiresAt: "2026-09-09T12:05:00.000Z",
+    },
+  };
+}
+
+function paymentEvent() {
+  return {
+    eventId: "payment-event-1",
+    eventType: "PaymentCaptured",
+    eventVersion: "1.0",
+    occurredAt: "2026-09-10T12:00:00.000Z",
+    correlationId: "corr-checkout-1",
+    causationId: "execution-1",
+    aggregateType: "Payment",
+    aggregateId: "payment-1",
+    payload: {
+      checkoutId: "checkout-1",
+      paymentId: "payment-1",
+      providerReference: "fake-payment-payment-1",
+      status: "CAPTURED",
     },
   };
 }

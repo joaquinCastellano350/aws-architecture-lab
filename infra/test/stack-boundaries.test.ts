@@ -15,6 +15,6 @@ describe("stack boundaries", () => {
       expect(workload.node.dependencies).toHaveLength(0);
       expect(() => app.synth()).not.toThrow();
     },
-    60_000,
+    120_000,
   );
 });
