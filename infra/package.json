@@ -12,6 +12,7 @@
     "expiry:workload": "npm run build && node dist/bin/expiry-workload.js",
     "failure:workload": "npm run build && node dist/bin/failure-workload.js",
     "preflight": "npm run build && node dist/bin/preflight.js",
+    "replay:workload": "npm run build && node dist/bin/replay-workload.js",
     "smoke:workload": "npm run build && node dist/bin/smoke-workload.js",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false",

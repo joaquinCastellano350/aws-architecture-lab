@@ -47,7 +47,7 @@ describe("checkout OpenAPI contract", () => {
   });
 
   it("generates routes, header validation, and response validation from OpenAPI", () => {
-    expect(checkoutApiVersion).toBe("5.0.0");
+    expect(checkoutApiVersion).toBe("6.0.0");
     expect(checkoutApiPaths.submit).toBe("/checkouts");
     expect(idempotencyKeyHeaderName).toBe("Idempotency-Key");
     expect(validateIdempotencyKey("request-123")).toBe(true);
@@ -99,6 +99,13 @@ describe("checkout OpenAPI contract", () => {
       correlationId: "corr-123",
       createdAt: "2026-09-07T12:00:00.000Z",
       updatedAt: "2026-09-12T12:00:00.000Z",
+    }).ok).toBe(true);
+    expect(validateCheckoutStatusResponse({
+      checkoutId: "checkout-123",
+      status: "RECONCILIATION_REQUIRED",
+      correlationId: "corr-123",
+      createdAt: "2026-09-07T12:00:00.000Z",
+      updatedAt: "2026-09-13T12:00:00.000Z",
     }).ok).toBe(true);
     expect(validateCheckoutStatusResponse({
       checkoutId: "checkout-123",

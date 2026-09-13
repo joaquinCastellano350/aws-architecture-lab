@@ -19,12 +19,15 @@ import type {
   MarkOrderExpiredOutcome,
   MarkOrderInventoryUnavailableCommand,
   MarkOrderInventoryUnavailableOutcome,
+  MarkOrderReconciliationRequiredCommand,
+  MarkOrderReconciliationRequiredOutcome,
   OrderExpiredEvent,
   OrderCancelledEvent,
   OrderCompensatingEvent,
   OrderConfirmedEvent,
   OrderInventoryUnavailableEvent,
   OrderPendingEvent,
+  OrderReconciliationRequiredEvent,
 } from "@aws-architecture-lab/contracts";
 
 import type { Order } from "./checkout-api.js";
@@ -142,6 +145,7 @@ export async function markOrderConfirmed(
     input,
     "CONFIRMED",
     dependencies,
+    ["PENDING", "RECONCILIATION_REQUIRED"],
   ) as Promise<MarkOrderConfirmedOutcome>;
 }
 
@@ -157,7 +161,7 @@ export async function markOrderCancelled(
     input,
     "CANCELLED",
     dependencies,
-    "COMPENSATING",
+    ["COMPENSATING", "RECONCILIATION_REQUIRED"],
   ) as Promise<MarkOrderCancelledOutcome>;
 }
 
@@ -176,24 +180,45 @@ export async function markOrderCompensating(
   ) as Promise<MarkOrderCompensatingOutcome>;
 }
 
+export async function markOrderReconciliationRequired(
+  orderTableName: string,
+  outboxTableName: string,
+  input: MarkOrderReconciliationRequiredCommand,
+  dependencies: OrderRepositoryDependencies = {},
+): Promise<MarkOrderReconciliationRequiredOutcome> {
+  return transitionOrder(
+    orderTableName,
+    outboxTableName,
+    input,
+    "RECONCILIATION_REQUIRED",
+    dependencies,
+    ["PENDING", "COMPENSATING"],
+  ) as Promise<MarkOrderReconciliationRequiredOutcome>;
+}
+
 type OrderTransitionCommand =
   | MarkOrderInventoryUnavailableCommand
   | MarkOrderExpiredCommand
   | MarkOrderCompensatingCommand
   | MarkOrderCancelledCommand
+  | MarkOrderReconciliationRequiredCommand
   | MarkOrderConfirmedCommand;
 type OrderTransitionOutcome =
   | MarkOrderInventoryUnavailableOutcome
   | MarkOrderExpiredOutcome
   | MarkOrderCompensatingOutcome
   | MarkOrderCancelledOutcome
+  | MarkOrderReconciliationRequiredOutcome
   | MarkOrderConfirmedOutcome;
 type OrderTransitionEvent =
   | OrderInventoryUnavailableEvent
   | OrderExpiredEvent
   | OrderCompensatingEvent
   | OrderCancelledEvent
+  | OrderReconciliationRequiredEvent
   | OrderConfirmedEvent;
+type OrderStatus = Order["status"];
+type RequiredOrderStatus = OrderStatus | readonly [OrderStatus, ...OrderStatus[]];
 
 async function transitionOrder(
   orderTableName: string,
@@ -201,7 +226,7 @@ async function transitionOrder(
   input: OrderTransitionCommand,
   status: OrderTransitionOutcome["status"],
   dependencies: OrderRepositoryDependencies,
-  requiredStatus = "PENDING",
+  requiredStatus: RequiredOrderStatus = "PENDING",
 ): Promise<OrderTransitionOutcome> {
   const now = (dependencies.clock ?? (() => new Date()))();
   const eventId = (dependencies.eventId ?? randomUUID)();
@@ -232,6 +257,13 @@ async function transitionOrder(
     return recordedOrderOutcome(recordedOperation, payloadHash);
   }
   const operation = orderOperation(input.operationId, payloadHash, outcome, now.toISOString());
+  const requiredStatuses = Array.isArray(requiredStatus) ? requiredStatus : [requiredStatus];
+  const statusCondition = requiredStatuses.length === 1
+    ? "#status = :requiredStatus"
+    : `#status IN (${requiredStatuses.map((_, index) => `:requiredStatus${index}`).join(", ")})`;
+  const requiredStatusValues = requiredStatuses.length === 1
+    ? { ":requiredStatus": requiredStatuses[0] }
+    : Object.fromEntries(requiredStatuses.map((value, index) => [`:requiredStatus${index}`, value]));
   try {
     await client.send(new TransactWriteCommand({
       TransactItems: [
@@ -240,10 +272,10 @@ async function transitionOrder(
             TableName: orderTableName,
             Key: { checkoutId: input.checkoutId },
             UpdateExpression: "SET #status = :targetStatus, updatedAt = :updatedAt",
-            ConditionExpression: "#status = :requiredStatus AND correlationId = :correlationId",
+            ConditionExpression: `${statusCondition} AND correlationId = :correlationId`,
             ExpressionAttributeNames: { "#status": "status" },
             ExpressionAttributeValues: {
-              ":requiredStatus": requiredStatus,
+              ...requiredStatusValues,
               ":targetStatus": status,
               ":correlationId": input.correlationId,
               ":updatedAt": now.toISOString(),
@@ -299,6 +331,7 @@ function orderEventType(status: OrderTransitionOutcome["status"]): OrderTransiti
     case "INVENTORY_UNAVAILABLE": return "OrderInventoryUnavailable";
     case "EXPIRED": return "OrderExpired";
     case "COMPENSATING": return "OrderCompensating";
+    case "RECONCILIATION_REQUIRED": return "OrderReconciliationRequired";
     case "CANCELLED": return "OrderCancelled";
     case "CONFIRMED": return "OrderConfirmed";
   }

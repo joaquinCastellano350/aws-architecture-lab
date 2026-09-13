@@ -6,6 +6,7 @@ import {
   validateOrderCompensatingEvent,
   validateOrderExpiredEvent,
   validateOrderPendingEvent,
+  validateOrderReconciliationRequiredEvent,
 } from "./generated/order-event.js";
 
 describe("Order event JSON schema", () => {
@@ -89,6 +90,20 @@ describe("Order event JSON schema", () => {
       aggregateType: "Order",
       aggregateId: "checkout-123",
       payload: { status: "COMPENSATING" },
+    }).ok).toBe(true);
+  });
+
+  it("accepts a truthful reconciliation-required Order fact", () => {
+    expect(validateOrderReconciliationRequiredEvent({
+      eventId: "event-reconciliation",
+      eventType: "OrderReconciliationRequired",
+      eventVersion: "1.0",
+      occurredAt: "2026-09-13T12:00:00.000Z",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+      aggregateType: "Order",
+      aggregateId: "checkout-123",
+      payload: { status: "RECONCILIATION_REQUIRED" },
     }).ok).toBe(true);
   });
 

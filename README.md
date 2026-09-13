@@ -132,7 +132,16 @@ Payment, cancels the reversible Fulfillment reservation, and releases Inventory.
 IDs and durable outcomes make replay safe, and the Order becomes `CANCELLED` only after all
 required compensation outcomes are confirmed.
 
-The OpenAPI 3.0 contract is versioned `5.0.0` and exposes `COMPENSATING`, `CANCELLED`,
+If bounded compensation exhausts its retries, both Order and Saga become
+`RECONCILIATION_REQUIRED`. A separately owned record captures the failed invariant, required
+domain action, attempt count, business correlation, immutable workflow version, and timestamps;
+its transactional outbox fact drives a dedicated actionable CloudWatch alarm. Failures after the
+irreversible Fulfillment handoff are retrieved and recovered forward—never reported as cancelled.
+An operator can resume the pinned workflow through the audited replay command; recovery reuses
+the same versioned domain contracts and idempotency ledgers and never edits domain tables.
+
+The OpenAPI 3.0 contract is versioned `6.0.0` and exposes `COMPENSATING`,
+`RECONCILIATION_REQUIRED`, `CANCELLED`,
 `CONFIRMED`, and `EXPIRED` customer outcomes while
 continuing to accept the existing v1 submission schema. Reservations carry a five-minute business deadline. The
 workflow compensates a captured Payment if Inventory can no longer commit. A one-minute
@@ -150,6 +159,7 @@ npm run workload:deploy
 npm run workload:smoke
 npm run workload:expiry
 npm run workload:failure
+npm run workload:replay -- --operation-id <unique-id> --reconciliation-id <id> --requested-by <operator> --reason <reason>
 npm run workload:destroy
 ```
 
@@ -167,12 +177,14 @@ an abandoned reservation, duplicate sweeps, duplicate release delivery, and a re
 commit-versus-expiry race. It uses four uniquely named checkouts and requires
 `CHECKOUT_REQUEST_CEILING` to be at least `4`.
 
-`workload:failure` runs twelve deployed scenarios through the immutable workflow alias. It
+`workload:failure` runs fourteen deployed scenarios through the immutable workflow alias. It
 asserts Inventory rejection, deterministic Payment failures, capture reconciliation, post-capture
 Inventory commit failure, reverse-order compensation, replay without duplicate effects, customer
-Order status, durable operation-ledger results, emitted outbox facts, and bounded transitions.
+Order status, exhausted refund and Inventory-release reconciliation, rejected Fulfillment
+cancellation, audited replay and eventual resolution, durable operation-ledger results, emitted
+outbox facts, and bounded transitions.
 It writes provider plans only through the narrowly scoped test role and requires
-`CHECKOUT_REQUEST_CEILING` to be at least `12`.
+`CHECKOUT_REQUEST_CEILING` to be at least `14`.
 
 Set `WORKLOAD_PROFILE=production-reference` before `workload:synth` to generate the
 production-reference template without the failure-plan table, role, environment variables,

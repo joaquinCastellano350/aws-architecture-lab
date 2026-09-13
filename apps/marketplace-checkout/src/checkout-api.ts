@@ -57,6 +57,7 @@ export interface Order {
     | "INVENTORY_UNAVAILABLE"
     | "EXPIRED"
     | "COMPENSATING"
+    | "RECONCILIATION_REQUIRED"
     | "CANCELLED"
     | "CONFIRMED";
   readonly createdAt: string;

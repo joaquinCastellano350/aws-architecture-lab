@@ -3,6 +3,7 @@ import {
   validateCancelFulfillmentCommand,
   validateHandoffFulfillmentCommand,
   validateReserveFulfillmentCommand,
+  validateRetrieveFulfillmentCommand,
   type FulfillmentCommand,
   type FulfillmentCommandOutcome,
 } from "@aws-architecture-lab/contracts";
@@ -22,6 +23,8 @@ export function createFulfillmentCommandHandler(fulfillment: FulfillmentCommandE
         ? validateCancelFulfillmentCommand(event)
       : commandType === "HandoffFulfillment"
         ? validateHandoffFulfillmentCommand(event)
+      : commandType === "RetrieveFulfillment"
+        ? validateRetrieveFulfillmentCommand(event)
         : undefined;
     if (validation === undefined) throw new Error("Unsupported Fulfillment command");
     if (!validation.ok) throw new Error(validation.error);

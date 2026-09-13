@@ -9,6 +9,38 @@ import { describe, expect, it } from "vitest";
 import { DynamoFulfillmentRepository } from "./dynamo-fulfillment-repository.js";
 
 describe("Fulfillment persistence", () => {
+  it("retrieves the committed handoff state without creating another mutation", async () => {
+    const sent: unknown[] = [];
+    const client = {
+      async send(command: unknown) {
+        sent.push(command);
+        if (command instanceof GetCommand) {
+          return { Item: {
+            reservationId: "fulfillment-checkout-123",
+            checkoutId: "checkout-123",
+            correlationId: "corr-123",
+            status: "HANDED_OFF",
+          } };
+        }
+        throw new Error("Retrieve must not mutate Fulfillment");
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const fulfillment = new DynamoFulfillmentRepository(
+      "fulfillment",
+      "fulfillment-outbox",
+      { client },
+    );
+
+    await expect(fulfillment.execute(command("RetrieveFulfillment", "retrieve"))).resolves
+      .toEqual({
+        schemaVersion: "1.0",
+        operationId: "retrieve",
+        checkoutId: "checkout-123",
+        reservationId: "fulfillment-checkout-123",
+        status: "HANDED_OFF",
+      });
+    expect(sent).toHaveLength(1);
+  });
   it("commits reservation and irreversible handoff with their outbox facts", async () => {
     const dynamo = new FulfillmentDynamoHarness();
     const fulfillment = repository(dynamo);
@@ -64,6 +96,31 @@ describe("Fulfillment persistence", () => {
       "FulfillmentReserved",
       "FulfillmentHandedOff",
     ]);
+  });
+
+  it("records a stable business rejection for deployed cancellation evidence", async () => {
+    const client = {
+      async send(request: unknown) {
+        if (request instanceof GetCommand) {
+          return request.input.TableName === "failure-plans"
+            ? { Item: { effects: ["BUSINESS_REJECTION"] } }
+            : {};
+        }
+        if (request instanceof PutCommand || request instanceof TransactWriteCommand) return {};
+        throw new Error("Unexpected DynamoDB command");
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const fulfillment = new DynamoFulfillmentRepository(
+      "fulfillment",
+      "fulfillment-outbox",
+      { client, failurePlanTableName: "failure-plans" },
+    );
+
+    await expect(fulfillment.execute(command("CancelFulfillment", "cancel-rejected"))).resolves
+      .toEqual(expect.objectContaining({
+        status: "RESERVATION_NOT_ACTIVE",
+        reservationStatus: "RESERVED",
+      }));
   });
 
   it("returns the recorded outcome for duplicate delivery and rejects operation reuse", async () => {
@@ -161,7 +218,7 @@ function repository(client: FulfillmentDynamoHarness) {
 }
 
 function command(
-  commandType: "ReserveFulfillment" | "CancelFulfillment" | "HandoffFulfillment",
+  commandType: "ReserveFulfillment" | "CancelFulfillment" | "HandoffFulfillment" | "RetrieveFulfillment",
   operationId: string,
 ) {
   return {

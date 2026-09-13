@@ -15,6 +15,8 @@ const definitions = await Promise.all([
   load("mark-order-compensating-outcome.v1.json", "validateMarkOrderCompensatingOutcome"),
   load("mark-order-cancelled-command.v1.json", "validateMarkOrderCancelledCommand"),
   load("mark-order-cancelled-outcome.v1.json", "validateMarkOrderCancelledOutcome"),
+  load("mark-order-reconciliation-required-command.v1.json", "validateMarkOrderReconciliationRequiredCommand"),
+  load("mark-order-reconciliation-required-outcome.v1.json", "validateMarkOrderReconciliationRequiredOutcome"),
 ]);
 const lines = [
   "// Generated from schemas/create-pending-order-*.v1.json. Do not edit by hand.",

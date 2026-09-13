@@ -1,9 +1,10 @@
 # Marketplace Checkout Saga
 
-The current increment recovers every reversible failure before the Fulfillment handoff pivot.
-The happy path still proceeds through provider-neutral Payment and SQS-buffered Fulfillment.
-Recovery exposes `COMPENSATING`, records refund and cancellation as new facts with stable
-operation IDs, and exposes `CANCELLED` only after every required compensation is confirmed.
+The current increment makes failed compensation and irreversible outcomes explicit. Recovery
+exposes `COMPENSATING`, records refund and cancellation as facts with stable operation IDs, and
+exposes `CANCELLED` only after every required compensation is confirmed. Exhausted work moves
+both Order and Saga to `RECONCILIATION_REQUIRED`; after the Fulfillment pivot, recovery moves
+forward and never invents cancellation.
 
 1. An IAM-authenticated caller submits the OpenAPI-defined checkout request with a client
    idempotency key.
@@ -67,6 +68,18 @@ operation IDs, and exposes `CANCELLED` only after every required compensation is
 17. The Order audit consumer records each distinct routed Order fact with a conditional write keyed by
    `eventId`. Repeated EventBridge delivery therefore succeeds without duplicating the
    audit record.
+18. Exhausted refund, cancellation, or Inventory-release attempts invoke the Order and
+    Reconciliation capabilities. The resulting work record captures the failed invariant,
+    required action, attempts, correlation, the Saga's actual immutable workflow version, and
+    timestamps. `ReconciliationRequired` is published transactionally and a log metric raises the
+    dedicated actionable alarm; expected Inventory, Payment, and capacity rejections never emit it.
+19. A handoff callback failure retrieves Fulfillment-owned state. A committed handoff continues
+    toward Order confirmation; unresolved ambiguity creates `RECOVER_FULFILLMENT_HANDOFF` work
+    rather than cancelling Payment, Inventory, Fulfillment, or Order.
+20. `workload:replay` requires a unique operation ID, operator identity, and reason, appends that audit entry, and starts
+    the workflow version recorded by the original Saga. Its replay route invokes only versioned
+    domain commands with stable operation identifiers. Resolution atomically updates the work and
+    Saga and publishes `ReconciliationResolved`.
 
 The Saga table stores admission and execution metadata under separate prefixed keys. The
 Order, Inventory, Payment, and Fulfillment own their state and outbox tables; the coordinator has no
@@ -90,8 +103,8 @@ duplicate delivery, cancellation, refund, and ambiguous completion, including ze
 capture under replay.
 The deployed fakes consume effects from durable `FAILURE_PLAN#<semantic-key>` records in a
 dedicated failure-plan table. Payment supports the full deterministic provider matrix;
-Fulfillment uses a business-rejection plan to return the typed `CAPACITY_UNAVAILABLE`
-outcome without mutating capacity. Only the separately assumable
+Fulfillment uses business-rejection plans for typed reservation and cancellation outcomes without
+mutating capacity. Only the separately assumable
 `FakePaymentFailurePlanRoleArn` can write that key namespace; domain Lambdas can only read
 plans, and the role has no access to provider state, domain ledgers, or outbox records.
 Production-reference synthesis omits the entire test control plane when
@@ -106,7 +119,9 @@ The deployed `workload:expiry` evidence command exercises the workflow deadline,
 reservation recovery, duplicate sweeps and releases, and the real DynamoDB race between
 commit and expiry. TTL remains cleanup-only evidence rather than a correctness mechanism.
 
-The deployed `workload:failure` evidence command exercises twelve bounded scenarios. It verifies
+The deployed `workload:failure` evidence command exercises fourteen bounded scenarios. It verifies
 pre- and post-capture branches, capture ambiguity, Inventory commit failure, customer-visible
 compensation, durable operation results, emitted facts, replay without duplicate economic effects,
-and transition ceilings. Failures after the irreversible Fulfillment pivot remain a later milestone.
+exhausted refund and Inventory-release reconciliation, rejected Fulfillment cancellation, audited
+replay, eventual resolution, and transition ceilings. Local and synthesized tests also prove
+forward recovery after the irreversible handoff pivot.

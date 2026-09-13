@@ -10,6 +10,68 @@ import {
 const template = workloadTemplate();
 
 describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
+  it("turns exhausted compensation and irreversible uncertainty into actionable reconciliation", () => {
+    const definition = JSON.stringify(
+      Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
+    );
+
+    for (const state of [
+      "MarkOrderReconciliationRequired",
+      "CreateReconciliation",
+      "CheckoutReconciliationRequired",
+      "RetrieveFulfillmentAfterHandoffFailure",
+      "ReconciliationReplayRoute",
+      "ReplayCancelPaymentAuthorization",
+      "ReplayRefundCapturedPayment",
+      "ReplayCancelFulfillmentReservation",
+      "ReplayReleaseCompensatingInventory",
+      "ResolveReconciliation",
+    ]) {
+      expect(definition).toContain(state);
+    }
+    expect(definition).toContain("RECONCILIATION_REQUIRED");
+    expect(definition).toContain("RECOVER_FULFILLMENT_HANDOFF");
+    expect(definition).toContain("COMPENSATE_CAPTURED_PAYMENT");
+    expect(definition).toContain("$.reconciliationReplay.operationId");
+    expect(definition).toMatch(/RefundCapturedPayment.*CreateReconciliation/);
+    expect(definition).toMatch(/HandoffFulfillment.*RetrieveFulfillmentAfterHandoffFailure/);
+    expect(definition).not.toMatch(
+      /RetrieveFulfillmentAfterHandoffFailure.*HANDED_OFF.*BeginCapturedPaymentCompensation/,
+    );
+    expect(definition).toMatch(
+      /FulfillmentCancellationOutcome.*RESERVATION_NOT_ACTIVE.*HANDED_OFF.*ReconcileFulfillmentHandoff/,
+    );
+
+    template.resourceCountIs("AWS::DynamoDB::Table", 14);
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmDescription: Match.stringLikeRegexp("reconciliation"),
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+      EvaluationPeriods: 1,
+      Threshold: 1,
+    });
+    template.hasResourceProperties("AWS::Logs::MetricFilter", {
+      FilterPattern: '{ $.event = "ReconciliationRequired" }',
+    });
+    for (const output of [
+      "ReconciliationTableName",
+      "ReconciliationOutboxTableName",
+      "ReconciliationReplayFunctionName",
+      "ReconciliationRequiredAlarmName",
+    ]) {
+      template.hasOutput(output, {});
+    }
+
+    const functions = Object.values(template.findResources("AWS::Lambda::Function"));
+    const reconciliation = functions.find((fn) =>
+      fn.Properties?.Environment?.Variables?.RECONCILIATION_OUTBOX_TABLE_NAME !== undefined &&
+      fn.Properties?.FunctionName === "aws-architecture-lab-reconciliation-command"
+    );
+    const replay = functions.find((fn) =>
+      fn.Properties?.FunctionName === "aws-architecture-lab-reconciliation-replay"
+    );
+    expect(reconciliation).toBeDefined();
+    expect(replay).toBeDefined();
+  });
   it("reconciles capture uncertainty before selecting cancellation or refund", () => {
     const definition = JSON.stringify(
       Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
@@ -190,7 +252,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     )).toBe(true);
 
     const tables = Object.values(template.findResources("AWS::DynamoDB::Table"));
-    expect(tables).toHaveLength(12);
+    expect(tables).toHaveLength(14);
     expect(tables.filter((table) =>
       JSON.stringify(table.Properties?.KeySchema) === JSON.stringify([
         { AttributeName: "recordKey", KeyType: "HASH" },
@@ -226,7 +288,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
 
   it("omits the failure-plan control plane from production-reference synthesis", () => {
     const productionReference = workloadTemplate({ enableFakePaymentFailurePlans: false });
-    productionReference.resourceCountIs("AWS::DynamoDB::Table", 11);
+    productionReference.resourceCountIs("AWS::DynamoDB::Table", 13);
     const policies = JSON.stringify(productionReference.findResources("AWS::IAM::Policy"));
     expect(policies).not.toContain("FAILURE_PLAN#*");
     const functions = Object.values(productionReference.findResources("AWS::Lambda::Function"));
@@ -265,7 +327,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
   });
 
   it("gives Order and Saga Execution separately owned durable records", () => {
-    template.resourceCountIs("AWS::DynamoDB::Table", 12);
+    template.resourceCountIs("AWS::DynamoDB::Table", 14);
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       KeySchema: [{ AttributeName: "checkoutId", KeyType: "HASH" }],
       SSESpecification: { SSEEnabled: true },
@@ -283,7 +345,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     });
 
     const tables = Object.values(template.findResources("AWS::DynamoDB::Table"));
-    expect(tables).toHaveLength(12);
+    expect(tables).toHaveLength(14);
     for (const table of tables) {
       expect(table.DeletionPolicy).toBe("Delete");
       expect(table.UpdateReplacePolicy).toBe("Delete");
@@ -350,7 +412,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
       },
     });
     template.resourceCountIs("AWS::StepFunctions::StateMachineVersion", 1);
-    template.resourceCountIs("AWS::Lambda::Version", 5);
+    template.resourceCountIs("AWS::Lambda::Version", 6);
     template.hasResourceProperties("AWS::StepFunctions::StateMachineAlias", {
       Name: "LIVE",
       RoutingConfiguration: [
@@ -373,7 +435,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
 
     for (const resourceType of ["AWS::StepFunctions::StateMachineVersion", "AWS::Lambda::Version"]) {
       const versions = Object.values(template.findResources(resourceType));
-      expect(versions).toHaveLength(resourceType === "AWS::Lambda::Version" ? 5 : 1);
+      expect(versions).toHaveLength(resourceType === "AWS::Lambda::Version" ? 6 : 1);
       expect(versions[0]?.UpdateReplacePolicy).toBe("Retain");
       expect(versions[0]?.DeletionPolicy).toBe("Retain");
     }
@@ -500,7 +562,9 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
 
     const startExecutionStatements = Object.values(template.findResources("AWS::IAM::Policy"))
       .flatMap((policy) => policy.Properties?.PolicyDocument?.Statement ?? [])
-      .filter((statement) => statement.Action === "states:StartExecution");
+      .filter((statement) =>
+        statement.Action === "states:StartExecution" && statement.Condition !== undefined
+      );
 
     expect(startExecutionStatements).toEqual([
       {
@@ -533,7 +597,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     });
 
     const functions = Object.values(template.findResources("AWS::Lambda::Function"));
-    expect(functions).toHaveLength(13);
+    expect(functions).toHaveLength(16);
     for (const fn of functions) {
       expect(fn.Properties?.ReservedConcurrentExecutions).toBeUndefined();
     }
@@ -545,7 +609,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
       const configuredTemplate = workloadTemplate({ lambdaReservedConcurrency: 3 });
       const functions = Object.values(configuredTemplate.findResources("AWS::Lambda::Function"));
 
-      expect(functions).toHaveLength(13);
+      expect(functions).toHaveLength(16);
       for (const fn of functions) {
         expect(fn.Properties?.ReservedConcurrentExecutions).toBe(3);
       }

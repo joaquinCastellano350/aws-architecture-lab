@@ -29,6 +29,7 @@ export interface InventoryRepositoryDependencies {
   readonly eventId?: () => string;
   readonly expiryIndexName?: string;
   readonly initialQuantity?: number;
+  readonly failurePlanTableName?: string;
 }
 
 interface InventoryOperation {
@@ -62,6 +63,7 @@ export class DynamoInventoryRepository {
   readonly #eventId: () => string;
   readonly #expiryIndexName: string;
   readonly #initialQuantity: number;
+  readonly #failurePlanTableName: string | undefined;
   readonly #inventoryTableName: string;
   readonly #outboxTableName: string;
 
@@ -83,12 +85,21 @@ export class DynamoInventoryRepository {
     this.#eventId = dependencies.eventId ?? randomUUID;
     this.#expiryIndexName = dependencies.expiryIndexName ?? "ReservationExpiryIndex";
     this.#initialQuantity = initialQuantity;
+    this.#failurePlanTableName = dependencies.failurePlanTableName;
   }
 
   public async execute(command: InventoryCommand): Promise<InventoryCommandOutcome> {
     const payloadHash = stablePayloadHash(command);
     const recorded = await this.#startOperation(command, payloadHash);
     if (recorded !== undefined) return recorded;
+    if (
+      command.commandType === "ReleaseInventory" &&
+      await this.#nextReleaseFailure(command.reservationId) === "FAIL_BEFORE_MUTATION"
+    ) {
+      const error = new Error("Inventory release failed before mutation");
+      error.name = "TransactionConflictException";
+      throw error;
+    }
 
     switch (command.commandType) {
       case "ReserveInventory":
@@ -120,6 +131,37 @@ export class DynamoInventoryRepository {
       Limit: limit,
     }));
     return (result.Items ?? []) as InventoryReservation[];
+  }
+
+  async #nextReleaseFailure(reservationId: string): Promise<"FAIL_BEFORE_MUTATION" | undefined> {
+    if (this.#failurePlanTableName === undefined) return undefined;
+    const semanticKey = `inventory:${reservationId}:release`;
+    const response = await this.#client.send(new GetCommand({
+      TableName: this.#failurePlanTableName,
+      Key: { recordKey: `FAILURE_PLAN#${semanticKey}` },
+      ConsistentRead: true,
+    }));
+    const effects = (response.Item as { readonly effects?: unknown } | undefined)?.effects;
+    if (effects === undefined) return undefined;
+    if (!Array.isArray(effects) || effects.some((effect) => effect !== "FAIL_BEFORE_MUTATION")) {
+      throw new Error("Inventory failure plan contains an unsupported effect");
+    }
+    const attempt = await this.#client.send(new UpdateCommand({
+      TableName: this.#inventoryTableName,
+      Key: { recordKey: `FAILURE_ATTEMPT#${semanticKey}` },
+      UpdateExpression:
+        "SET recordType = if_not_exists(recordType, :recordType), attemptCount = if_not_exists(attemptCount, :zero) + :one",
+      ExpressionAttributeValues: {
+        ":recordType": "FAILURE_ATTEMPT",
+        ":zero": 0,
+        ":one": 1,
+      },
+      ReturnValues: "ALL_OLD",
+    }));
+    const previousAttempt = attempt.Attributes?.attemptCount;
+    return effects[typeof previousAttempt === "number" ? previousAttempt : 0] as
+      | "FAIL_BEFORE_MUTATION"
+      | undefined;
   }
 
   async #reserve(

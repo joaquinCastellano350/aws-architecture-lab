@@ -6,6 +6,7 @@ import {
 } from "@aws-sdk/client-sfn";
 
 import type { WorkflowExecution, WorkflowInput, WorkflowStarter } from "./checkout-api.js";
+import { executionArnFor } from "./step-functions-arn.js";
 
 export class StepFunctionsWorkflowStarter implements WorkflowStarter {
   readonly #client = new SFNClient({});
@@ -38,15 +39,4 @@ export class StepFunctionsWorkflowStarter implements WorkflowStarter {
     }
     return { executionArn, workflowVersionArn: execution.stateMachineVersionArn };
   }
-}
-
-function executionArnFor(aliasArn: string, checkoutId: string): string {
-  const marker = ":stateMachine:";
-  const markerIndex = aliasArn.indexOf(marker);
-  const resource = aliasArn.slice(markerIndex + marker.length);
-  const stateMachineName = resource.split(":")[0];
-  if (markerIndex < 0 || stateMachineName === undefined || stateMachineName.length === 0) {
-    throw new Error("WORKFLOW_ALIAS_ARN is not a Step Functions alias ARN");
-  }
-  return `${aliasArn.slice(0, markerIndex)}:execution:${stateMachineName}:${checkoutId}`;
 }

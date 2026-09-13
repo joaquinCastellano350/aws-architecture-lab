@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { isRecord, runAwsJson } from "../lib/aws-cli.js";
 import { executeAsyncCli, runEnvironmentPreflight } from "../lib/cli.js";
 import { dynamoStringAttribute, pollUntil, stackOutput } from "../lib/workload-evidence.js";
@@ -23,14 +27,18 @@ interface EvidenceContext {
   readonly paymentOutboxTableName: string;
   readonly paymentTableName: string;
   readonly providerTableName: string;
+  readonly reconciliationReplayFunctionName: string;
+  readonly reconciliationTableName: string;
   readonly runId: string;
+  readonly sagaTableName: string;
   readonly workflowAliasArn: string;
+  readonly workflowVersionArn: string;
 }
 
 await executeAsyncCli(async () => {
   const preflight = runEnvironmentPreflight();
-  if (preflight.requestCeiling < 12) {
-    throw new Error("CHECKOUT_REQUEST_CEILING must be at least 12 for the failure evidence suite.");
+  if (preflight.requestCeiling < 14) {
+    throw new Error("CHECKOUT_REQUEST_CEILING must be at least 14 for the failure evidence suite.");
   }
   const context: EvidenceContext = {
     failurePlanTableName: stackOutput("FakePaymentFailurePlanTableName"),
@@ -44,8 +52,12 @@ await executeAsyncCli(async () => {
     paymentOutboxTableName: stackOutput("PaymentOutboxTableName"),
     paymentTableName: stackOutput("PaymentTableName"),
     providerTableName: stackOutput("FakePaymentProviderTableName"),
+    reconciliationReplayFunctionName: stackOutput("ReconciliationReplayFunctionName"),
+    reconciliationTableName: stackOutput("ReconciliationTableName"),
     runId: Date.now().toString(),
+    sagaTableName: stackOutput("SagaTableName"),
     workflowAliasArn: stackOutput("CheckoutWorkflowAliasArn"),
+    workflowVersionArn: stackOutput("CheckoutWorkflowVersionArn"),
   };
 
   await verifyInventoryRejection(context);
@@ -57,9 +69,11 @@ await executeAsyncCli(async () => {
   await verifyPaymentPlan(context, "DUPLICATE_DELIVERY", "CONFIRMED", 1);
   await verifyFulfillmentReservationFailure(context);
   await verifyCaptureFailure(context);
+  await verifyFulfillmentCancellationReconciliation(context);
   await verifyAmbiguousCapture(context);
   await verifyInventoryCommitFailure(context);
   await verifyRefundRetryExhaustion(context);
+  await verifyReleaseRetryExhaustion(context);
 
   console.log(
     "Failure checks passed: pre-capture and post-capture branches, capture reconciliation, reverse-order compensation, replay without duplicate economic effects, durable ledgers and facts, and bounded workflow transitions.",
@@ -335,6 +349,82 @@ async function verifyAmbiguousCapture(context: EvidenceContext): Promise<void> {
   }
 }
 
+async function verifyFulfillmentCancellationReconciliation(
+  context: EvidenceContext,
+): Promise<void> {
+  const checkoutId = checkoutIdFor(context, "fulfillment-cancel-rejection");
+  const captureKey = `payment:payment-${checkoutId}:capture`;
+  const cancellationKey = `fulfillment:fulfillment-${checkoutId}:cancel`;
+  const replayOperationId = `replay-cancel-fulfillment-${checkoutId}`;
+  putFailurePlan(context, captureKey, [
+    "FAIL_BEFORE_MUTATION",
+    "FAIL_BEFORE_MUTATION",
+    "FAIL_BEFORE_MUTATION",
+  ]);
+  putFailurePlan(context, cancellationKey, ["BUSINESS_REJECTION"]);
+  try {
+    const executionArn = startWorkflow(context, checkoutId);
+    const history = await waitForExecution(executionArn);
+    await waitForOrderStatus(context, checkoutId, "RECONCILIATION_REQUIRED");
+    assertStateVisits(history, "CancelFulfillmentReservation", 1);
+    assertStateVisits(history, "CreateReconciliation", 1);
+    assertOperationStatus(
+      context.fulfillmentTableName,
+      "recordKey",
+      `OPERATION#cancel-fulfillment-${checkoutId}`,
+      "RESERVATION_NOT_ACTIVE",
+    );
+    assertStringAttribute(
+      dynamoItem(
+        context.reconciliationTableName,
+        "reconciliationId",
+        `reconciliation-${checkoutId}`,
+      ),
+      "requiredAction",
+      "COMPENSATE_RESERVED_FULFILLMENT",
+    );
+
+    deleteFailurePlan(context, captureKey);
+    deleteFailurePlan(context, cancellationKey);
+    const replay = invokeLambda(context.reconciliationReplayFunctionName, {
+      schemaVersion: "1.0",
+      commandType: "ReplayReconciliation",
+      operationId: replayOperationId,
+      reconciliationId: `reconciliation-${checkoutId}`,
+      requestedBy: "failure-evidence",
+      reason: "Fulfillment cancellation rejection was cleared",
+    });
+    if (!isRecord(replay) || typeof replay.executionArn !== "string") {
+      throw new Error("Fulfillment cancellation replay did not return an execution ARN.");
+    }
+    const replayHistory = await waitForExecution(replay.executionArn);
+    await waitForOrderStatus(context, checkoutId, "CANCELLED");
+    assertStateVisits(replayHistory, "ReplayCancelFulfillmentReservation", 1);
+    assertOperationStatus(
+      context.fulfillmentTableName,
+      "recordKey",
+      `OPERATION#${replayOperationId}`,
+      "CANCELLED",
+    );
+    assertStringAttribute(
+      dynamoItem(
+        context.reconciliationTableName,
+        "reconciliationId",
+        `reconciliation-${checkoutId}`,
+      ),
+      "status",
+      "RESOLVED",
+    );
+    assertCompensationFacts(context, checkoutId, [
+      "PaymentAuthorized",
+      "PaymentCancelled",
+    ], true);
+  } finally {
+    deleteFailurePlan(context, captureKey);
+    deleteFailurePlan(context, cancellationKey);
+  }
+}
+
 async function verifyInventoryCommitFailure(context: EvidenceContext): Promise<void> {
   const checkoutId = checkoutIdFor(context, "inventory-commit");
   const now = Date.now();
@@ -404,9 +494,10 @@ async function verifyRefundRetryExhaustion(context: EvidenceContext): Promise<vo
   ]);
   try {
     const executionArn = startWorkflow(context, checkoutId, 1, timing);
-    const failedHistory = await waitForExecution(executionArn, "FAILED");
-    await waitForOrderStatus(context, checkoutId, "COMPENSATING");
+    const failedHistory = await waitForExecution(executionArn);
+    await waitForOrderStatus(context, checkoutId, "RECONCILIATION_REQUIRED");
     assertStateVisits(failedHistory, "RefundCapturedPayment", 1);
+    assertStateVisits(failedHistory, "CreateReconciliation", 1);
     assertNumberAttribute(
       dynamoItem(context.providerTableName, "recordKey", `FAILURE_ATTEMPT#${semanticKey}`),
       "attemptCount",
@@ -421,9 +512,44 @@ async function verifyRefundRetryExhaustion(context: EvidenceContext): Promise<vo
       "PaymentAuthorized",
       "PaymentCaptured",
     ]);
+    assertStringAttribute(
+      dynamoItem(
+        context.reconciliationTableName,
+        "reconciliationId",
+        `reconciliation-${checkoutId}`,
+      ),
+      "requiredAction",
+      "COMPENSATE_CAPTURED_PAYMENT",
+    );
+    assertStringAttribute(
+      dynamoItem(context.sagaTableName, "recordKey", `SAGA#${checkoutId}`),
+      "status",
+      "RECONCILIATION_REQUIRED",
+    );
 
     deleteFailurePlan(context, semanticKey);
-    await replayWorkflow(context, checkoutId, timing);
+    const replay = invokeLambda(context.reconciliationReplayFunctionName, {
+      schemaVersion: "1.0",
+      commandType: "ReplayReconciliation",
+      operationId: `replay-refund-${checkoutId}`,
+      reconciliationId: `reconciliation-${checkoutId}`,
+      requestedBy: "failure-evidence",
+      reason: "Deterministic provider failure plan was removed",
+    });
+    if (!isRecord(replay) || typeof replay.executionArn !== "string") {
+      throw new Error("Reconciliation replay did not return an execution ARN.");
+    }
+    await waitForExecution(replay.executionArn);
+    await waitForOrderStatus(context, checkoutId, "CANCELLED");
+    assertStringAttribute(
+      dynamoItem(
+        context.reconciliationTableName,
+        "reconciliationId",
+        `reconciliation-${checkoutId}`,
+      ),
+      "status",
+      "RESOLVED",
+    );
     assertOperationStatus(
       context.paymentTableName,
       "recordKey",
@@ -434,9 +560,69 @@ async function verifyRefundRetryExhaustion(context: EvidenceContext): Promise<vo
       "PaymentAuthorized",
       "PaymentCaptured",
       "PaymentRefunded",
-    ]);
+    ], true);
   } finally {
     deleteFailurePlan(context, semanticKey);
+  }
+}
+
+async function verifyReleaseRetryExhaustion(context: EvidenceContext): Promise<void> {
+  const checkoutId = checkoutIdFor(context, "release-exhaustion");
+  const paymentKey = `payment:payment-${checkoutId}:authorize`;
+  const releaseKey = `inventory:reservation-${checkoutId}:release`;
+  putFailurePlan(context, paymentKey, ["BUSINESS_REJECTION"]);
+  putFailurePlan(context, releaseKey, [
+    "FAIL_BEFORE_MUTATION",
+    "FAIL_BEFORE_MUTATION",
+    "FAIL_BEFORE_MUTATION",
+  ]);
+  try {
+    const executionArn = startWorkflow(context, checkoutId);
+    const history = await waitForExecution(executionArn);
+    await waitForOrderStatus(context, checkoutId, "RECONCILIATION_REQUIRED");
+    assertStateVisits(history, "ReleaseCompensatingInventory", 1);
+    assertStateVisits(history, "CreateReconciliation", 1);
+    assertNumberAttribute(
+      dynamoItem(context.inventoryTableName, "recordKey", `FAILURE_ATTEMPT#${releaseKey}`),
+      "attemptCount",
+      3,
+    );
+    assertStringAttribute(
+      dynamoItem(
+        context.reconciliationTableName,
+        "reconciliationId",
+        `reconciliation-${checkoutId}`,
+      ),
+      "requiredAction",
+      "COMPENSATE_INVENTORY",
+    );
+
+    deleteFailurePlan(context, releaseKey);
+    const replay = invokeLambda(context.reconciliationReplayFunctionName, {
+      schemaVersion: "1.0",
+      commandType: "ReplayReconciliation",
+      operationId: `replay-release-${checkoutId}`,
+      reconciliationId: `reconciliation-${checkoutId}`,
+      requestedBy: "failure-evidence",
+      reason: "Deterministic Inventory failure plan was removed",
+    });
+    if (!isRecord(replay) || typeof replay.executionArn !== "string") {
+      throw new Error("Inventory reconciliation replay did not return an execution ARN.");
+    }
+    await waitForExecution(replay.executionArn);
+    await waitForOrderStatus(context, checkoutId, "CANCELLED");
+    assertStringAttribute(
+      dynamoItem(
+        context.reconciliationTableName,
+        "reconciliationId",
+        `reconciliation-${checkoutId}`,
+      ),
+      "status",
+      "RESOLVED",
+    );
+  } finally {
+    deleteFailurePlan(context, paymentKey);
+    deleteFailurePlan(context, releaseKey);
   }
 }
 
@@ -444,6 +630,7 @@ function assertCompensationFacts(
   context: EvidenceContext,
   checkoutId: string,
   paymentEvents: readonly string[],
+  reconciled = false,
 ): void {
   assertEvents(context.paymentOutboxTableName, checkoutId, paymentEvents);
   assertEvents(context.fulfillmentOutboxTableName, checkoutId, [
@@ -457,6 +644,7 @@ function assertCompensationFacts(
   assertEvents(context.orderOutboxTableName, checkoutId, [
     "OrderPending",
     "OrderCompensating",
+    ...(reconciled ? ["OrderReconciliationRequired"] : []),
     "OrderCancelled",
   ]);
 }
@@ -495,6 +683,23 @@ function startWorkflow(
     readonly reservationExpiresAt?: string;
   } = {},
 ): string {
+  const now = new Date().toISOString();
+  runAwsJson([
+    "dynamodb",
+    "put-item",
+    "--table-name",
+    context.sagaTableName,
+    "--item",
+    JSON.stringify({
+      recordKey: { S: `SAGA#${checkoutId}` },
+      recordType: { S: "SAGA_EXECUTION" },
+      checkoutId: { S: checkoutId },
+      correlationId: { S: `corr-${checkoutId}` },
+      workflowVersionArn: { S: context.workflowVersionArn },
+      createdAt: { S: now },
+      updatedAt: { S: now },
+    }),
+  ]);
   const response = runAwsJson([
     "stepfunctions",
     "start-execution",
@@ -520,6 +725,34 @@ function startWorkflow(
     throw new Error(`Step Functions did not start ${checkoutId}.`);
   }
   return response.executionArn;
+}
+
+function invokeLambda(functionName: string, payload: unknown): unknown {
+  const directory = mkdtempSync(path.join(tmpdir(), "aws-architecture-lab-failure-"));
+  const responsePath = path.join(directory, "response.json");
+  try {
+    const metadata = runAwsJson([
+      "lambda",
+      "invoke",
+      "--function-name",
+      functionName,
+      "--cli-binary-format",
+      "raw-in-base64-out",
+      "--payload",
+      JSON.stringify(payload),
+      responsePath,
+    ]);
+    if (!isRecord(metadata) || metadata.StatusCode !== 200 || metadata.FunctionError !== undefined) {
+      throw new Error(`Lambda ${functionName} failed: ${JSON.stringify(metadata)}`);
+    }
+    const response = JSON.parse(readFileSync(responsePath, "utf8")) as unknown;
+    if (isRecord(response) && typeof response.errorMessage === "string") {
+      throw new Error(`Lambda ${functionName} failed: ${response.errorMessage}`);
+    }
+    return response;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 async function replayWorkflow(

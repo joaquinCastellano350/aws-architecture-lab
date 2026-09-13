@@ -13,6 +13,7 @@ import {
   markOrderConfirmed,
   markOrderExpired,
   markOrderInventoryUnavailable,
+  markOrderReconciliationRequired,
 } from "./dynamo-order-repository.js";
 
 describe("Order persistence", () => {
@@ -237,9 +238,11 @@ describe("Order persistence", () => {
     expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([
       expect.objectContaining({
         Update: expect.objectContaining({
-          ConditionExpression: "#status = :requiredStatus AND correlationId = :correlationId",
+          ConditionExpression:
+            "#status IN (:requiredStatus0, :requiredStatus1) AND correlationId = :correlationId",
           ExpressionAttributeValues: expect.objectContaining({
-            ":requiredStatus": "PENDING",
+            ":requiredStatus0": "PENDING",
+            ":requiredStatus1": "RECONCILIATION_REQUIRED",
             ":targetStatus": "CONFIRMED",
           }),
         }),
@@ -287,9 +290,11 @@ describe("Order persistence", () => {
     expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([
       expect.objectContaining({
         Update: expect.objectContaining({
-          ConditionExpression: "#status = :requiredStatus AND correlationId = :correlationId",
+          ConditionExpression:
+            "#status IN (:requiredStatus0, :requiredStatus1) AND correlationId = :correlationId",
           ExpressionAttributeValues: expect.objectContaining({
-            ":requiredStatus": "COMPENSATING",
+            ":requiredStatus0": "COMPENSATING",
+            ":requiredStatus1": "RECONCILIATION_REQUIRED",
             ":targetStatus": "CANCELLED",
           }),
         }),
@@ -351,6 +356,57 @@ describe("Order persistence", () => {
             eventId: "event-compensating",
             eventType: "OrderCompensating",
             payload: { status: "COMPENSATING" },
+          }),
+        }),
+      }),
+    ]));
+  });
+
+  it("marks an unresolved Order for reconciliation from forward or compensating work", async () => {
+    const sent: unknown[] = [];
+    const client = {
+      async send(command: unknown) {
+        sent.push(command);
+        if (command instanceof GetCommand) return {};
+        return {};
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    const order = await markOrderReconciliationRequired("orders", "order-outbox", {
+      schemaVersion: "1.0",
+      commandType: "MarkOrderReconciliationRequired",
+      operationId: "mark-order-reconciliation-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    }, {
+      client,
+      clock: () => new Date("2026-09-13T12:00:00.000Z"),
+      eventId: () => "event-reconciliation",
+    });
+
+    expect(order.status).toBe("RECONCILIATION_REQUIRED");
+    const transaction = sent.find(
+      (command): command is TransactWriteCommand => command instanceof TransactWriteCommand,
+    );
+    expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Update: expect.objectContaining({
+          ConditionExpression:
+            "#status IN (:requiredStatus0, :requiredStatus1) AND correlationId = :correlationId",
+          ExpressionAttributeValues: expect.objectContaining({
+            ":requiredStatus0": "PENDING",
+            ":requiredStatus1": "COMPENSATING",
+            ":targetStatus": "RECONCILIATION_REQUIRED",
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          TableName: "order-outbox",
+          Item: expect.objectContaining({
+            eventType: "OrderReconciliationRequired",
+            payload: { status: "RECONCILIATION_REQUIRED" },
           }),
         }),
       }),

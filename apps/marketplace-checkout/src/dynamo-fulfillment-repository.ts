@@ -34,15 +34,40 @@ export class DynamoFulfillmentRepository {
   }
 
   public async execute(command: FulfillmentCommand): Promise<FulfillmentCommandOutcome> {
+    if (command.commandType === "RetrieveFulfillment") {
+      const reservation = await this.#reservation(command.reservationId);
+      if (
+        reservation === undefined ||
+        reservation.checkoutId !== command.checkoutId ||
+        reservation.correlationId !== command.correlationId
+      ) {
+        return {
+          schemaVersion: "1.0",
+          operationId: command.operationId,
+          checkoutId: command.checkoutId,
+          reservationId: command.reservationId,
+          status: "RESERVATION_NOT_ACTIVE",
+        };
+      }
+      return {
+        schemaVersion: "1.0",
+        operationId: command.operationId,
+        checkoutId: command.checkoutId,
+        reservationId: command.reservationId,
+        status: reservation.status,
+      };
+    }
     const payloadHash = stablePayloadHash(command);
     const recorded = await this.#startOperation(command.operationId, payloadHash);
     if (recorded !== undefined) return recorded;
 
-    if (
-      command.commandType === "ReserveFulfillment" &&
-      await this.#capacityUnavailable(command.reservationId)
-    ) {
-      return this.#recordCapacityUnavailable(command, payloadHash);
+    if (await this.#businessRejection(command)) {
+      if (command.commandType === "ReserveFulfillment") {
+        return this.#recordCapacityUnavailable(command, payloadHash);
+      }
+      if (command.commandType === "CancelFulfillment") {
+        return this.#recordReservationNotActive(command, payloadHash, "RESERVED");
+      }
     }
 
     const now = this.#clock().toISOString();
@@ -227,11 +252,18 @@ export class DynamoFulfillmentRepository {
     return this.#recordFailedOperation(command.operationId, payloadHash, result);
   }
 
-  async #capacityUnavailable(reservationId: string): Promise<boolean> {
+  async #businessRejection(command: FulfillmentCommand): Promise<boolean> {
     if (this.#failurePlanTableName === undefined) return false;
+    const operation = command.commandType === "ReserveFulfillment"
+      ? "reserve"
+      : command.commandType === "CancelFulfillment"
+        ? "cancel"
+        : command.commandType === "HandoffFulfillment"
+          ? "handoff"
+          : "retrieve";
     const response = await this.#client.send(new GetCommand({
       TableName: this.#failurePlanTableName,
-      Key: { recordKey: failurePlanKey(reservationId) },
+      Key: { recordKey: failurePlanKey(command.reservationId, operation) },
       ConsistentRead: true,
     }));
     const effects = (response.Item as { readonly effects?: unknown } | undefined)?.effects;
@@ -297,6 +329,8 @@ interface FulfillmentOperation {
 
 interface FulfillmentReservation {
   readonly reservationId: string;
+  readonly checkoutId: string;
+  readonly correlationId: string;
   readonly status: "RESERVED" | "CANCELLED" | "HANDED_OFF";
 }
 
@@ -358,8 +392,8 @@ function reservationKey(reservationId: string): string {
   return `RESERVATION#${reservationId}`;
 }
 
-function failurePlanKey(reservationId: string): string {
-  return `FAILURE_PLAN#fulfillment:${reservationId}:reserve`;
+function failurePlanKey(reservationId: string, operation: string): string {
+  return `FAILURE_PLAN#fulfillment:${reservationId}:${operation}`;
 }
 
 function isTransactionCancellation(error: unknown): boolean {

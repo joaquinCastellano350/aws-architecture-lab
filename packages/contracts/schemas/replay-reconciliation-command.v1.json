@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:reconciliation:replay-command:v1",
+  "title": "ReplayReconciliationCommand",
+  "type": "object",
+  "required": ["schemaVersion", "commandType", "operationId", "reconciliationId", "requestedBy", "reason"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "commandType": { "type": "string", "const": "ReplayReconciliation" },
+    "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "reconciliationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "requestedBy": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 1024 }
+  },
+  "additionalProperties": false
+}

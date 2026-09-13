@@ -13,6 +13,8 @@ import {
   validateMarkOrderCompensatingOutcome,
   validateMarkOrderInventoryUnavailableCommand,
   validateMarkOrderInventoryUnavailableOutcome,
+  validateMarkOrderReconciliationRequiredCommand,
+  validateMarkOrderReconciliationRequiredOutcome,
 } from "./generated/order-command.js";
 
 describe("Order command JSON schemas", () => {
@@ -123,6 +125,23 @@ describe("Order command JSON schemas", () => {
       checkoutId: "checkout-123",
       correlationId: "corr-123",
       status: "COMPENSATING",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the explicit reconciliation-required command and outcome", () => {
+    expect(validateMarkOrderReconciliationRequiredCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderReconciliationRequired",
+      operationId: "mark-order-reconciliation-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderReconciliationRequiredOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "RECONCILIATION_REQUIRED",
     }).ok).toBe(true);
   });
 

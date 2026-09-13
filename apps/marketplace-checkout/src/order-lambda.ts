@@ -6,12 +6,14 @@ import {
   validateMarkOrderConfirmedCommand,
   validateMarkOrderExpiredCommand,
   validateMarkOrderInventoryUnavailableCommand,
+  validateMarkOrderReconciliationRequiredCommand,
   type CreatePendingOrderOutcome,
   type MarkOrderCancelledOutcome,
   type MarkOrderCompensatingOutcome,
   type MarkOrderConfirmedOutcome,
   type MarkOrderExpiredOutcome,
   type MarkOrderInventoryUnavailableOutcome,
+  type MarkOrderReconciliationRequiredOutcome,
 } from "@aws-architecture-lab/contracts";
 
 import {
@@ -21,6 +23,7 @@ import {
   markOrderConfirmed,
   markOrderExpired,
   markOrderInventoryUnavailable,
+  markOrderReconciliationRequired,
 } from "./dynamo-order-repository.js";
 import { commandTypeOf } from "./domain-command.js";
 import { requiredEnvironment } from "./environment.js";
@@ -34,9 +37,19 @@ export const handler: Handler<
   | MarkOrderCancelledOutcome
   | MarkOrderCompensatingOutcome
   | MarkOrderInventoryUnavailableOutcome
+  | MarkOrderReconciliationRequiredOutcome
   | MarkOrderExpiredOutcome
   | MarkOrderConfirmedOutcome
 > = async (event) => {
+  if (commandTypeOf(event) === "MarkOrderReconciliationRequired") {
+    const validation = validateMarkOrderReconciliationRequiredCommand(event);
+    if (!validation.ok) throw new Error(validation.error);
+    return markOrderReconciliationRequired(
+      orderTableName,
+      outboxTableName,
+      validation.value,
+    );
+  }
   if (commandTypeOf(event) === "MarkOrderCompensating") {
     const validation = validateMarkOrderCompensatingCommand(event);
     if (!validation.ok) throw new Error(validation.error);

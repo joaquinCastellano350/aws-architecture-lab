@@ -33,6 +33,17 @@ export interface HandoffFulfillmentCommand {
   readonly [key: string]: unknown;
 }
 
+export interface RetrieveFulfillmentCommand {
+  readonly schemaVersion: "1.0";
+  readonly commandType: "RetrieveFulfillment";
+  readonly operationId: string;
+  readonly checkoutId: string;
+  readonly reservationId: string;
+  readonly correlationId: string;
+  readonly causationId: string;
+  readonly [key: string]: unknown;
+}
+
 export interface FulfillmentCommandOutcome {
   readonly schemaVersion: "1.0";
   readonly operationId: string;
@@ -43,7 +54,7 @@ export interface FulfillmentCommandOutcome {
   readonly [key: string]: unknown;
 }
 
-export type FulfillmentCommand = ReserveFulfillmentCommand | CancelFulfillmentCommand | HandoffFulfillmentCommand;
+export type FulfillmentCommand = ReserveFulfillmentCommand | CancelFulfillmentCommand | HandoffFulfillmentCommand | RetrieveFulfillmentCommand;
 
 export type FulfillmentContractValidationResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -104,6 +115,25 @@ export function validateHandoffFulfillmentCommand(
     return { ok: false, error: "Value does not match HandoffFulfillmentCommand" };
   }
   return { ok: true, value: input as HandoffFulfillmentCommand };
+}
+
+export function validateRetrieveFulfillmentCommand(
+  input: unknown,
+): FulfillmentContractValidationResult<RetrieveFulfillmentCommand> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["commandType"] !== "string" || (input as Record<string, unknown>)["commandType"] !== "RetrieveFulfillment") ||
+    (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["reservationId"] !== "string" || String((input as Record<string, unknown>)["reservationId"]).length < 1 || String((input as Record<string, unknown>)["reservationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256)
+  ) {
+    return { ok: false, error: "Value does not match RetrieveFulfillmentCommand" };
+  }
+  return { ok: true, value: input as RetrieveFulfillmentCommand };
 }
 
 export function validateFulfillmentCommandOutcome(

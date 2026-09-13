@@ -8,7 +8,12 @@ import { requiredEnvironment } from "./environment.js";
 const inventory = new DynamoInventoryRepository(
   requiredEnvironment("INVENTORY_TABLE_NAME"),
   requiredEnvironment("INVENTORY_OUTBOX_TABLE_NAME"),
-  { initialQuantity: positiveIntegerEnvironment("INVENTORY_INITIAL_QUANTITY") },
+  {
+    initialQuantity: positiveIntegerEnvironment("INVENTORY_INITIAL_QUANTITY"),
+    ...(process.env.INVENTORY_FAILURE_PLAN_TABLE_NAME === undefined
+      ? {}
+      : { failurePlanTableName: process.env.INVENTORY_FAILURE_PLAN_TABLE_NAME }),
+  },
 );
 
 export const handler: Handler<unknown, InventoryCommandOutcome> =

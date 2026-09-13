@@ -5,6 +5,7 @@ import {
   validateCancelFulfillmentCommand,
   validateHandoffFulfillmentCommand,
   validateReserveFulfillmentCommand,
+  validateRetrieveFulfillmentCommand,
 } from "./generated/fulfillment-command.js";
 
 describe("Fulfillment command JSON schemas", () => {
@@ -16,6 +17,9 @@ describe("Fulfillment command JSON schemas", () => {
       expect.objectContaining({ ok: true }),
     );
     expect(validateCancelFulfillmentCommand(command("CancelFulfillment", "cancel"))).toEqual(
+      expect.objectContaining({ ok: true }),
+    );
+    expect(validateRetrieveFulfillmentCommand(command("RetrieveFulfillment", "retrieve"))).toEqual(
       expect.objectContaining({ ok: true }),
     );
     expect(validateFulfillmentCommandOutcome({
@@ -50,7 +54,7 @@ describe("Fulfillment command JSON schemas", () => {
 });
 
 function command(
-  commandType: "ReserveFulfillment" | "CancelFulfillment" | "HandoffFulfillment",
+  commandType: "ReserveFulfillment" | "CancelFulfillment" | "HandoffFulfillment" | "RetrieveFulfillment",
   prefix: string,
 ) {
   return {

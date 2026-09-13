@@ -15,7 +15,13 @@ import {
   type StackProps,
 } from "aws-cdk-lib";
 import { ApiDefinition, MethodLoggingLevel, SpecRestApi } from "aws-cdk-lib/aws-apigateway";
-import { Dashboard, GraphWidget } from "aws-cdk-lib/aws-cloudwatch";
+import {
+  Alarm,
+  ComparisonOperator,
+  Dashboard,
+  GraphWidget,
+  TreatMissingData,
+} from "aws-cdk-lib/aws-cloudwatch";
 import {
   AttributeType,
   BillingMode,
@@ -36,7 +42,7 @@ import {
 import { CfnVersion, Runtime, StartingPosition, type IFunction } from "aws-cdk-lib/aws-lambda";
 import { DynamoEventSource, SqsDlq, SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
-import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
+import { FilterPattern, LogGroup, MetricFilter, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
 import {
   CfnStateMachineAlias,
@@ -58,8 +64,15 @@ import {
   Timeout,
   Wait,
   WaitTime,
+  type IChainable,
 } from "aws-cdk-lib/aws-stepfunctions";
 import { LambdaInvoke, SqsSendMessage } from "aws-cdk-lib/aws-stepfunctions-tasks";
+import {
+  reconciliationRecoveryPlan,
+  type CreateReconciliationCommand,
+  type ReconciliationRequiredAction,
+  type ReconciliationWorkflowStep,
+} from "@aws-architecture-lab/contracts";
 import type { Construct } from "constructs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -68,6 +81,7 @@ const orderPendingEventType = "OrderPending";
 const inventoryEventSource = "aws-architecture-lab.inventory";
 const paymentEventSource = "aws-architecture-lab.payment";
 const fulfillmentEventSource = "aws-architecture-lab.fulfillment";
+const reconciliationEventSource = "aws-architecture-lab.reconciliation";
 const internalCommandTransientErrors = [
   "Lambda.ServiceException",
   "Lambda.AWSLambdaException",
@@ -77,6 +91,7 @@ const internalCommandTransientErrors = [
   "ProvisionedThroughputExceededException",
   "ThrottlingException",
   "InternalServerError",
+  "SagaWorkflowVersionPendingError",
 ];
 const paymentCommandTransientErrors = [
   ...internalCommandTransientErrors,
@@ -130,6 +145,23 @@ export class MarketplaceCheckoutStack extends Stack {
       maxReadRequestUnits: 100,
       maxWriteRequestUnits: 100,
       removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const reconciliationTable = new Table(this, "Reconciliations", {
+      partitionKey: { name: "reconciliationId", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const reconciliationOutboxTable = new Table(this, "ReconciliationOutbox", {
+      partitionKey: { name: "eventId", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      encryption: TableEncryption.AWS_MANAGED,
+      maxReadRequestUnits: 100,
+      maxWriteRequestUnits: 100,
+      removalPolicy: RemovalPolicy.DESTROY,
+      stream: StreamViewType.NEW_IMAGE,
     });
     const orderOutboxTable = new Table(this, "OrderOutbox", {
       partitionKey: { name: "eventId", type: AttributeType.STRING },
@@ -345,6 +377,35 @@ export class MarketplaceCheckoutStack extends Stack {
     );
     eventBus.grantPutEventsTo(fulfillmentOutboxPublisher);
 
+    const failedReconciliationOutboxRecords = new Queue(
+      this,
+      "ReconciliationOutboxFailureDestination",
+      {
+        encryption: QueueEncryption.SQS_MANAGED,
+        retentionPeriod: Duration.days(4),
+        removalPolicy: RemovalPolicy.DESTROY,
+      },
+    );
+    const reconciliationOutboxPublisher = this.lambdaFunction(
+      "ReconciliationOutboxPublisher",
+      "outbox-publisher.ts",
+      {
+        EVENT_BUS_NAME: eventBus.eventBusName,
+        EVENT_SOURCE: reconciliationEventSource,
+      },
+    );
+    reconciliationOutboxPublisher.addEventSource(
+      new DynamoEventSource(reconciliationOutboxTable as ITable, {
+        batchSize: 10,
+        bisectBatchOnError: true,
+        onFailure: new SqsDlq(failedReconciliationOutboxRecords),
+        reportBatchItemFailures: true,
+        retryAttempts: 3,
+        startingPosition: StartingPosition.LATEST,
+      }),
+    );
+    eventBus.grantPutEventsTo(reconciliationOutboxPublisher);
+
     const auditConsumer = this.lambdaFunction("OrderAuditConsumer", "audit-consumer.ts", {
       AUDIT_TABLE_NAME: auditTable.tableName,
       EVENT_SOURCE: orderEventSource,
@@ -388,11 +449,15 @@ export class MarketplaceCheckoutStack extends Stack {
         INVENTORY_INITIAL_QUANTITY: "100",
         INVENTORY_OUTBOX_TABLE_NAME: inventoryOutboxTable.tableName,
         INVENTORY_TABLE_NAME: inventoryTable.tableName,
+        ...(fakePaymentFailurePlanTable === undefined
+          ? {}
+          : { INVENTORY_FAILURE_PLAN_TABLE_NAME: fakePaymentFailurePlanTable.tableName }),
       },
       Duration.seconds(3),
     );
     inventoryTable.grantReadWriteData(inventoryFunction);
     inventoryOutboxTable.grantWriteData(inventoryFunction);
+    fakePaymentFailurePlanTable?.grantReadData(inventoryFunction);
     inventoryFunction.addToRolePolicy(new PolicyStatement({
       actions: ["dynamodb:TransactWriteItems"],
       resources: [inventoryTable.tableArn, inventoryOutboxTable.tableArn],
@@ -453,6 +518,61 @@ export class MarketplaceCheckoutStack extends Stack {
     const cfnFulfillmentFunctionVersion =
       fulfillmentFunctionVersion.node.defaultChild as CfnVersion;
     retainAcrossDeployments(cfnFulfillmentFunctionVersion);
+
+    const reconciliationFunction = this.lambdaFunction(
+      "ReconciliationCommand",
+      "reconciliation-lambda.ts",
+      {
+        RECONCILIATION_OUTBOX_TABLE_NAME: reconciliationOutboxTable.tableName,
+        RECONCILIATION_TABLE_NAME: reconciliationTable.tableName,
+        SAGA_TABLE_NAME: sagaTable.tableName,
+      },
+      Duration.seconds(3),
+    );
+    reconciliationTable.grantReadWriteData(reconciliationFunction);
+    sagaTable.grantReadWriteData(reconciliationFunction);
+    reconciliationOutboxTable.grantWriteData(reconciliationFunction);
+    reconciliationFunction.addToRolePolicy(new PolicyStatement({
+      actions: ["dynamodb:TransactWriteItems"],
+      resources: [
+        reconciliationTable.tableArn,
+        sagaTable.tableArn,
+        reconciliationOutboxTable.tableArn,
+      ],
+    }));
+    const reconciliationFunctionVersion = reconciliationFunction.currentVersion;
+    const cfnReconciliationFunctionVersion =
+      reconciliationFunctionVersion.node.defaultChild as CfnVersion;
+    retainAcrossDeployments(cfnReconciliationFunctionVersion);
+
+    const reconciliationReplay = this.lambdaFunction(
+      "ReconciliationReplay",
+      "reconciliation-replay-lambda.ts",
+      {
+        RECONCILIATION_OUTBOX_TABLE_NAME: reconciliationOutboxTable.tableName,
+        RECONCILIATION_TABLE_NAME: reconciliationTable.tableName,
+        SAGA_TABLE_NAME: sagaTable.tableName,
+      },
+    );
+    reconciliationTable.grantReadWriteData(reconciliationReplay);
+    const reconciliationRequiredMetric = new MetricFilter(this, "ReconciliationRequiredMetric", {
+      logGroup: reconciliationFunction.logGroup,
+      filterPattern: FilterPattern.literal('{ $.event = "ReconciliationRequired" }'),
+      metricNamespace: "AWSArchitectureLab/MarketplaceCheckout",
+      metricName: "ReconciliationRequired",
+      metricValue: "1",
+      defaultValue: 0,
+    });
+    const reconciliationRequiredAlarm = new Alarm(this, "ReconciliationRequiredAlarm", {
+      alarmName: "aws-architecture-lab-marketplace-checkout-reconciliation-required",
+      alarmDescription:
+        "Action required: inspect the reconciliation record and use the audited replay command.",
+      metric: reconciliationRequiredMetric.metric({ period: Duration.minutes(1) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
 
     const failedFulfillmentWork = new Queue(this, "FulfillmentWorkDeadLetterQueue", {
       encryption: QueueEncryption.SQS_MANAGED,
@@ -720,30 +840,69 @@ export class MarketplaceCheckoutStack extends Stack {
       }),
       resultPath: "$.fulfillmentHandoff",
     });
-    const cancelPaymentAuthorization = new LambdaInvoke(this, "CancelPaymentAuthorization", {
-      lambdaFunction: paymentFunctionVersion as IFunction,
-      payload: TaskInput.fromObject({
-        schemaVersion: "1.0",
-        commandType: "CancelPayment",
-        operationId: JsonPath.format("compensate-payment-{}", JsonPath.stringAt("$.checkoutId")),
-        checkoutId: JsonPath.stringAt("$.checkoutId"),
-        paymentId: JsonPath.format("payment-{}", JsonPath.stringAt("$.checkoutId")),
-        correlationId: JsonPath.stringAt("$.correlationId"),
-        causationId: JsonPath.stringAt("$$.Execution.Id"),
-      }),
-      payloadResponseOnly: true,
-      resultPath: "$.paymentCancellation",
-      retryOnServiceExceptions: false,
-    });
-    this.addPaymentCommandRetry(cancelPaymentAuthorization);
-    const refundCapturedPayment = new LambdaInvoke(this, "RefundCapturedPayment", {
+    const retrieveFulfillmentAfterHandoffFailure = new LambdaInvoke(
+      this,
+      "RetrieveFulfillmentAfterHandoffFailure",
+      {
+        lambdaFunction: fulfillmentFunctionVersion as IFunction,
+        payload: TaskInput.fromObject({
+          schemaVersion: "1.0",
+          commandType: "RetrieveFulfillment",
+          operationId: JsonPath.format(
+            "reconcile-fulfillment-handoff-{}",
+            JsonPath.stringAt("$.checkoutId"),
+          ),
+          checkoutId: JsonPath.stringAt("$.checkoutId"),
+          reservationId: JsonPath.stringAt("$.fulfillmentReservation.reservationId"),
+          correlationId: JsonPath.stringAt("$.correlationId"),
+          causationId: JsonPath.stringAt("$$.Execution.Id"),
+        }),
+        payloadResponseOnly: true,
+        resultPath: "$.fulfillmentHandoffReconciliation",
+        retryOnServiceExceptions: false,
+      },
+    );
+    this.addInternalCommandRetry(retrieveFulfillmentAfterHandoffFailure);
+    const replayOperationId = JsonPath.stringAt("$.reconciliationReplay.operationId");
+    const compensationTaskPair = (
+      normalId: string,
+      normalOperationId: string,
+      create: (id: string, operationId: string) => LambdaInvoke,
+      addRetry: (task: LambdaInvoke) => void,
+    ) => {
+      const normal = create(normalId, normalOperationId);
+      const replay = create(`Replay${normalId}`, replayOperationId);
+      addRetry(normal);
+      addRetry(replay);
+      return { normal, replay };
+    };
+    const paymentCancellationTask = (id: string, operationId: string) => new LambdaInvoke(
+      this,
+      id,
+      {
+        lambdaFunction: paymentFunctionVersion as IFunction,
+        payload: TaskInput.fromObject({
+          schemaVersion: "1.0",
+          commandType: "CancelPayment",
+          operationId,
+          checkoutId: JsonPath.stringAt("$.checkoutId"),
+          paymentId: JsonPath.stringAt("$.paymentAuthorization.paymentId"),
+          correlationId: JsonPath.stringAt("$.correlationId"),
+          causationId: JsonPath.stringAt("$$.Execution.Id"),
+        }),
+        payloadResponseOnly: true,
+        resultPath: "$.paymentCancellation",
+        retryOnServiceExceptions: false,
+      },
+    );
+    const refundTask = (id: string, operationId: string) => new LambdaInvoke(this, id, {
       lambdaFunction: paymentFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
         schemaVersion: "1.0",
         commandType: "RefundPayment",
-        operationId: JsonPath.format("refund-payment-{}", JsonPath.stringAt("$.checkoutId")),
+        operationId,
         checkoutId: JsonPath.stringAt("$.checkoutId"),
-        paymentId: JsonPath.format("payment-{}", JsonPath.stringAt("$.checkoutId")),
+        paymentId: JsonPath.stringAt("$.paymentAuthorization.paymentId"),
         amountMinor: 1250,
         correlationId: JsonPath.stringAt("$.correlationId"),
         causationId: JsonPath.stringAt("$$.Execution.Id"),
@@ -752,24 +911,17 @@ export class MarketplaceCheckoutStack extends Stack {
       resultPath: "$.paymentRefund",
       retryOnServiceExceptions: false,
     });
-    this.addPaymentCommandRetry(refundCapturedPayment);
-    const cancelFulfillmentReservation = new LambdaInvoke(
+    const fulfillmentCancellationTask = (id: string, operationId: string) => new LambdaInvoke(
       this,
-      "CancelFulfillmentReservation",
+      id,
       {
         lambdaFunction: fulfillmentFunctionVersion as IFunction,
         payload: TaskInput.fromObject({
           schemaVersion: "1.0",
           commandType: "CancelFulfillment",
-          operationId: JsonPath.format(
-            "cancel-fulfillment-{}",
-            JsonPath.stringAt("$.checkoutId"),
-          ),
+          operationId,
           checkoutId: JsonPath.stringAt("$.checkoutId"),
-          reservationId: JsonPath.format(
-            "fulfillment-{}",
-            JsonPath.stringAt("$.checkoutId"),
-          ),
+          reservationId: JsonPath.stringAt("$.fulfillmentReservation.reservationId"),
           correlationId: JsonPath.stringAt("$.correlationId"),
           causationId: JsonPath.stringAt("$$.Execution.Id"),
         }),
@@ -778,19 +930,15 @@ export class MarketplaceCheckoutStack extends Stack {
         retryOnServiceExceptions: false,
       },
     );
-    this.addInternalCommandRetry(cancelFulfillmentReservation);
-    const releaseCompensatingInventory = new LambdaInvoke(
+    const inventoryReleaseTask = (id: string, operationId: string) => new LambdaInvoke(
       this,
-      "ReleaseCompensatingInventory",
+      id,
       {
         lambdaFunction: inventoryFunctionVersion as IFunction,
         payload: TaskInput.fromObject({
           schemaVersion: "1.0",
           commandType: "ReleaseInventory",
-          operationId: JsonPath.format(
-            "compensate-inventory-{}",
-            JsonPath.stringAt("$.checkoutId"),
-          ),
+          operationId,
           checkoutId: JsonPath.stringAt("$.checkoutId"),
           reservationId: JsonPath.stringAt("$.inventoryReservation.reservationId"),
           releaseReason: "COMPENSATION",
@@ -802,7 +950,42 @@ export class MarketplaceCheckoutStack extends Stack {
         retryOnServiceExceptions: false,
       },
     );
-    this.addInternalCommandRetry(releaseCompensatingInventory);
+    const {
+      normal: cancelPaymentAuthorization,
+      replay: replayCancelPaymentAuthorization,
+    } = compensationTaskPair(
+      "CancelPaymentAuthorization",
+      JsonPath.format("compensate-payment-{}", JsonPath.stringAt("$.checkoutId")),
+      paymentCancellationTask,
+      (task) => this.addPaymentCommandRetry(task),
+    );
+    const {
+      normal: refundCapturedPayment,
+      replay: replayRefundCapturedPayment,
+    } = compensationTaskPair(
+      "RefundCapturedPayment",
+      JsonPath.format("refund-payment-{}", JsonPath.stringAt("$.checkoutId")),
+      refundTask,
+      (task) => this.addPaymentCommandRetry(task),
+    );
+    const {
+      normal: cancelFulfillmentReservation,
+      replay: replayCancelFulfillmentReservation,
+    } = compensationTaskPair(
+      "CancelFulfillmentReservation",
+      JsonPath.format("cancel-fulfillment-{}", JsonPath.stringAt("$.checkoutId")),
+      fulfillmentCancellationTask,
+      (task) => this.addInternalCommandRetry(task),
+    );
+    const {
+      normal: releaseCompensatingInventory,
+      replay: replayReleaseCompensatingInventory,
+    } = compensationTaskPair(
+      "ReleaseCompensatingInventory",
+      JsonPath.format("compensate-inventory-{}", JsonPath.stringAt("$.checkoutId")),
+      inventoryReleaseTask,
+      (task) => this.addInternalCommandRetry(task),
+    );
     const markOrderCompensating = new LambdaInvoke(this, "MarkOrderCompensating", {
       lambdaFunction: orderFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
@@ -821,6 +1004,152 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(markOrderCompensating);
+    const markOrderReconciliationRequired = new LambdaInvoke(
+      this,
+      "MarkOrderReconciliationRequired",
+      {
+        lambdaFunction: orderFunctionVersion as IFunction,
+        payload: TaskInput.fromObject({
+          schemaVersion: "1.0",
+          commandType: "MarkOrderReconciliationRequired",
+          operationId: JsonPath.format(
+            "mark-order-reconciliation-{}",
+            JsonPath.stringAt("$.checkoutId"),
+          ),
+          checkoutId: JsonPath.stringAt("$.checkoutId"),
+          correlationId: JsonPath.stringAt("$.correlationId"),
+          causationId: JsonPath.stringAt("$$.Execution.Id"),
+        }),
+        payloadResponseOnly: true,
+        resultPath: "$.order",
+        retryOnServiceExceptions: false,
+      },
+    );
+    this.addInternalCommandRetry(markOrderReconciliationRequired);
+    const createReconciliation = new LambdaInvoke(this, "CreateReconciliation", {
+      lambdaFunction: reconciliationFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "CreateReconciliation",
+        operationId: JsonPath.format("reconcile-{}", JsonPath.stringAt("$.checkoutId")),
+        reconciliationId: JsonPath.format(
+          "reconciliation-{}",
+          JsonPath.stringAt("$.checkoutId"),
+        ),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+        failedInvariant: JsonPath.stringAt("$.reconciliation.failedInvariant"),
+        requiredAction: JsonPath.stringAt("$.reconciliation.requiredAction"),
+        attempts: JsonPath.numberAt("$.reconciliation.attempts"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.reconciliationResult",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(createReconciliation);
+    const resolveReconciliation = new LambdaInvoke(this, "ResolveReconciliation", {
+      lambdaFunction: reconciliationFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "ResolveReconciliation",
+        operationId: JsonPath.format(
+          "resolve-{}",
+          JsonPath.stringAt("$.reconciliationReplay.reconciliationId"),
+        ),
+        reconciliationId: JsonPath.stringAt("$.reconciliationReplay.reconciliationId"),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.reconciliationResult",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(resolveReconciliation);
+
+    const reconciliationStart = (
+      id: string,
+      metadata: Pick<CreateReconciliationCommand, "failedInvariant" | "requiredAction">,
+      attempts: number,
+    ) => new Pass(this, id, {
+      result: Result.fromObject({ ...metadata, attempts }),
+      resultPath: "$.reconciliation",
+    });
+    const reconciliationPair = (
+      id: string,
+      metadata: Pick<CreateReconciliationCommand, "failedInvariant" | "requiredAction">,
+    ) => ({
+      rejected: reconciliationStart(`Reconcile${id}`, metadata, 1),
+      exhausted: reconciliationStart(`Reconcile${id}Exhausted`, metadata, 3),
+    });
+    const {
+      rejected: reconcileInventoryRelease,
+      exhausted: reconcileInventoryReleaseExhausted,
+    } = reconciliationPair("InventoryRelease", {
+      failedInvariant: "RESERVED_INVENTORY_MUST_BE_RELEASED",
+      requiredAction: "COMPENSATE_INVENTORY",
+    });
+    const {
+      rejected: reconcilePaymentCancellation,
+      exhausted: reconcilePaymentCancellationExhausted,
+    } = reconciliationPair("PaymentCancellation", {
+      failedInvariant: "PAYMENT_AUTHORIZATION_MUST_BE_CANCELLED",
+      requiredAction: "COMPENSATE_PAYMENT_AUTHORIZATION",
+    });
+    const {
+      rejected: reconcileFulfillmentCancellation,
+      exhausted: reconcileFulfillmentCancellationExhausted,
+    } = reconciliationPair("FulfillmentCancellation", {
+      failedInvariant: "RESERVED_FULFILLMENT_MUST_BE_CANCELLED",
+      requiredAction: "COMPENSATE_RESERVED_FULFILLMENT",
+    });
+    const {
+      rejected: reconcileCapturedFulfillmentCancellation,
+      exhausted: reconcileCapturedFulfillmentCancellationExhausted,
+    } = reconciliationPair("CapturedFulfillmentCancellation", {
+      failedInvariant: "RESERVED_FULFILLMENT_MUST_BE_CANCELLED",
+      requiredAction: "COMPENSATE_CAPTURED_PAYMENT",
+    });
+    const {
+      rejected: reconcilePaymentRefund,
+      exhausted: reconcilePaymentRefundExhausted,
+    } = reconciliationPair("PaymentRefund", {
+      failedInvariant: "CAPTURED_PAYMENT_MUST_BE_REFUNDED",
+      requiredAction: "COMPENSATE_CAPTURED_PAYMENT",
+    });
+    const {
+      rejected: reconcileFulfillmentHandoff,
+      exhausted: reconcileFulfillmentHandoffExhausted,
+    } = reconciliationPair("FulfillmentHandoff", {
+      failedInvariant: "FULFILLMENT_HANDOFF_MUST_BE_CONFIRMED",
+      requiredAction: "RECOVER_FULFILLMENT_HANDOFF",
+    });
+    const {
+      rejected: reconcileOrderConfirmation,
+      exhausted: reconcileOrderConfirmationExhausted,
+    } = reconciliationPair("OrderConfirmation", {
+      failedInvariant: "HANDED_OFF_FULFILLMENT_MUST_CONFIRM_ORDER",
+      requiredAction: "CONFIRM_ORDER",
+    });
+    for (const reconciliation of [
+      reconcileInventoryRelease,
+      reconcilePaymentCancellation,
+      reconcileFulfillmentCancellation,
+      reconcileCapturedFulfillmentCancellation,
+      reconcilePaymentRefund,
+      reconcileFulfillmentHandoff,
+      reconcileOrderConfirmation,
+      reconcileInventoryReleaseExhausted,
+      reconcilePaymentCancellationExhausted,
+      reconcileFulfillmentCancellationExhausted,
+      reconcileCapturedFulfillmentCancellationExhausted,
+      reconcilePaymentRefundExhausted,
+      reconcileFulfillmentHandoffExhausted,
+      reconcileOrderConfirmationExhausted,
+    ]) {
+      reconciliation.next(markOrderReconciliationRequired);
+    }
     const beginInventoryCompensation = new Pass(this, "BeginInventoryCompensation", {
       result: Result.fromObject({ kind: "INVENTORY_ONLY" }),
       resultPath: "$.compensation",
@@ -911,6 +1240,49 @@ export class MarketplaceCheckoutStack extends Stack {
     this.addInternalCommandRetry(markOrderConfirmed);
     const checkoutCancelled = new Succeed(this, "CheckoutCancelled");
     const checkoutConfirmed = new Succeed(this, "CheckoutConfirmed");
+    const checkoutReconciliationRequired = new Succeed(
+      this,
+      "CheckoutReconciliationRequired",
+    );
+    const checkoutReconciliationResolved = new Succeed(this, "CheckoutReconciliationResolved");
+    markOrderReconciliationRequired.next(
+      new Choice(this, "OrderReconciliationRequiredOutcome")
+        .when(
+          Condition.stringEquals("$.order.status", "RECONCILIATION_REQUIRED"),
+          createReconciliation,
+        )
+        .otherwise(new Fail(this, "OrderReconciliationRequiredRejected", {
+          cause: "Order did not expose unresolved reconciliation work.",
+          error: "OrderInvariantViolation",
+        })),
+    );
+    createReconciliation.next(new Choice(this, "ReconciliationCreationOutcome")
+      .when(
+        Condition.stringEquals(
+          "$.reconciliationResult.status",
+          "RECONCILIATION_REQUIRED",
+        ),
+        checkoutReconciliationRequired,
+      )
+      .otherwise(new Fail(this, "ReconciliationCreationRejected", {
+        cause: "Reconciliation work was not durably created.",
+        error: "ReconciliationInvariantViolation",
+      })));
+    resolveReconciliation.next(new Choice(this, "ReconciliationResolutionOutcome")
+      .when(
+        Condition.stringEquals("$.reconciliationResult.status", "RESOLVED"),
+        checkoutReconciliationResolved,
+      )
+      .otherwise(new Fail(this, "ReconciliationResolutionRejected", {
+        cause: "Reconciliation work was not durably resolved.",
+        error: "ReconciliationInvariantViolation",
+      })));
+    const finishCancelledCheckout = new Choice(this, "FinishCancelledCheckout")
+      .when(Condition.isPresent("$.reconciliationReplay"), resolveReconciliation)
+      .otherwise(checkoutCancelled);
+    const finishConfirmedCheckout = new Choice(this, "FinishConfirmedCheckout")
+      .when(Condition.isPresent("$.reconciliationReplay"), resolveReconciliation)
+      .otherwise(checkoutConfirmed);
     const compensationPlan = new Choice(this, "CompensationPlan")
       .when(
         Condition.stringEquals("$.compensation.kind", "INVENTORY_ONLY"),
@@ -939,12 +1311,15 @@ export class MarketplaceCheckoutStack extends Stack {
         error: "OrderInvariantViolation",
       })));
     markOrderCancelled.next(new Choice(this, "OrderCancellationOutcome")
-      .when(Condition.stringEquals("$.order.status", "CANCELLED"), checkoutCancelled)
+      .when(Condition.stringEquals("$.order.status", "CANCELLED"), finishCancelledCheckout)
       .otherwise(new Fail(this, "OrderCancellationRejected", {
         cause: "Order returned an unsupported cancellation outcome.",
         error: "OrderInvariantViolation",
       })));
-    releaseCompensatingInventory.next(new Choice(this, "CompensatingInventoryReleaseOutcome")
+    const compensatingInventoryReleaseOutcome = new Choice(
+      this,
+      "CompensatingInventoryReleaseOutcome",
+    )
       .when(
         Condition.stringEquals("$.inventoryCompensation.status", "RELEASED"),
         markOrderCancelled,
@@ -956,29 +1331,59 @@ export class MarketplaceCheckoutStack extends Stack {
         ),
         Condition.stringEquals("$.inventoryCompensation.reservationStatus", "RELEASED"),
       ), markOrderCancelled)
-      .otherwise(new Fail(this, "CompensatingInventoryReleaseRejected", {
-        cause: "Inventory release was not confirmed, so the Order remains compensating.",
-        error: "InventoryCompensationFailure",
-      })));
-    cancelPaymentAuthorization.next(new Choice(this, "PaymentCancellationOutcome")
+      .otherwise(reconcileInventoryRelease);
+    for (const task of [releaseCompensatingInventory, replayReleaseCompensatingInventory]) {
+      task.next(compensatingInventoryReleaseOutcome);
+      task.addCatch(reconcileInventoryReleaseExhausted, {
+        errors: internalCommandTransientErrors,
+        resultPath: "$.inventoryCompensationError",
+      });
+    }
+    const paymentCancellationOutcome = new Choice(this, "PaymentCancellationOutcome")
       .when(
         Condition.stringEquals("$.paymentCancellation.status", "CANCELLED"),
         releaseCompensatingInventory,
       )
-      .otherwise(new Fail(this, "PaymentCancellationRejected", {
-        cause: "Payment cancellation was not confirmed, so later compensation did not run.",
-        error: "PaymentCompensationFailure",
-      })));
-    refundCapturedPayment.next(new Choice(this, "PaymentRefundOutcome")
+      .otherwise(reconcilePaymentCancellation);
+    for (const task of [cancelPaymentAuthorization, replayCancelPaymentAuthorization]) {
+      task.next(paymentCancellationOutcome);
+      task.addCatch(reconcilePaymentCancellationExhausted, {
+        errors: paymentCommandTransientErrors,
+        resultPath: "$.paymentCancellationError",
+      });
+    }
+    const paymentRefundOutcome = new Choice(this, "PaymentRefundOutcome")
       .when(
         Condition.stringEquals("$.paymentRefund.status", "REFUNDED"),
         cancelFulfillmentReservation,
       )
-      .otherwise(new Fail(this, "PaymentRefundRejected", {
-        cause: "Payment refund was not confirmed, so later compensation did not run.",
-        error: "PaymentCompensationFailure",
-      })));
-    cancelFulfillmentReservation.next(new Choice(this, "FulfillmentCancellationOutcome")
+      .otherwise(reconcilePaymentRefund);
+    for (const task of [refundCapturedPayment, replayRefundCapturedPayment]) {
+      task.next(paymentRefundOutcome);
+      task.addCatch(reconcilePaymentRefundExhausted, {
+        errors: paymentCommandTransientErrors,
+        resultPath: "$.paymentRefundError",
+      });
+    }
+    const reconcileFulfillmentCancellationPlan = new Choice(
+      this,
+      "ReconcileFulfillmentCancellationPlan",
+    )
+      .when(
+        Condition.stringEquals("$.compensation.kind", "CAPTURED_PAYMENT"),
+        reconcileCapturedFulfillmentCancellation,
+      )
+      .otherwise(reconcileFulfillmentCancellation);
+    const reconcileFulfillmentCancellationExhaustedPlan = new Choice(
+      this,
+      "ReconcileFulfillmentCancellationExhaustedPlan",
+    )
+      .when(
+        Condition.stringEquals("$.compensation.kind", "CAPTURED_PAYMENT"),
+        reconcileCapturedFulfillmentCancellationExhausted,
+      )
+      .otherwise(reconcileFulfillmentCancellationExhausted);
+    const fulfillmentCancellationOutcome = new Choice(this, "FulfillmentCancellationOutcome")
       .when(
         Condition.and(
           Condition.stringEquals("$.fulfillmentCancellation.status", "CANCELLED"),
@@ -990,25 +1395,56 @@ export class MarketplaceCheckoutStack extends Stack {
         Condition.stringEquals("$.fulfillmentCancellation.status", "CANCELLED"),
         cancelPaymentAuthorization,
       )
-      .otherwise(new Fail(this, "FulfillmentCancellationRejected", {
-        cause: "Fulfillment cancellation was not confirmed, so compensation stopped.",
-        error: "FulfillmentCompensationFailure",
-      })));
+      .when(
+        Condition.and(
+          Condition.stringEquals(
+            "$.fulfillmentCancellation.status",
+            "RESERVATION_NOT_ACTIVE",
+          ),
+          Condition.stringEquals(
+            "$.fulfillmentCancellation.reservationStatus",
+            "HANDED_OFF",
+          ),
+        ),
+        reconcileFulfillmentHandoff,
+      )
+      .otherwise(reconcileFulfillmentCancellationPlan);
+    for (const task of [cancelFulfillmentReservation, replayCancelFulfillmentReservation]) {
+      task.next(fulfillmentCancellationOutcome);
+      task.addCatch(reconcileFulfillmentCancellationExhaustedPlan, {
+        errors: internalCommandTransientErrors,
+        resultPath: "$.fulfillmentCancellationError",
+      });
+    }
     markOrderConfirmed.next(new Choice(this, "OrderConfirmationOutcome")
-      .when(Condition.stringEquals("$.order.status", "CONFIRMED"), checkoutConfirmed)
-      .otherwise(new Fail(this, "OrderConfirmationRejected", {
-        cause: "Order returned an unsupported confirmation outcome.",
-        error: "OrderInvariantViolation",
-      })));
+      .when(Condition.stringEquals("$.order.status", "CONFIRMED"), finishConfirmedCheckout)
+      .otherwise(reconcileOrderConfirmation));
     handoffFulfillment.next(new Choice(this, "FulfillmentHandoffOutcome")
       .when(
         Condition.stringEquals("$.fulfillmentHandoff.status", "HANDED_OFF"),
         markOrderConfirmed,
       )
-      .otherwise(new Fail(this, "FulfillmentHandoffRejected", {
-        cause: "Fulfillment returned an unsupported handoff outcome.",
-        error: "FulfillmentInvariantViolation",
-      })));
+      .otherwise(retrieveFulfillmentAfterHandoffFailure));
+    handoffFulfillment.addCatch(retrieveFulfillmentAfterHandoffFailure, {
+      errors: ["States.ALL"],
+      resultPath: "$.fulfillmentHandoffError",
+    });
+    retrieveFulfillmentAfterHandoffFailure.next(
+      new Choice(this, "FulfillmentHandoffReconciliationOutcome")
+        .when(
+          Condition.stringEquals("$.fulfillmentHandoffReconciliation.status", "HANDED_OFF"),
+          markOrderConfirmed,
+        )
+        .otherwise(reconcileFulfillmentHandoff),
+    );
+    retrieveFulfillmentAfterHandoffFailure.addCatch(reconcileFulfillmentHandoffExhausted, {
+      errors: ["States.ALL"],
+      resultPath: "$.fulfillmentHandoffReconciliationError",
+    });
+    markOrderConfirmed.addCatch(reconcileOrderConfirmationExhausted, {
+      errors: ["States.ALL"],
+      resultPath: "$.orderConfirmationError",
+    });
     markOrderInventoryUnavailable.next(new Choice(this, "OrderInventoryOutcome")
       .when(
         Condition.stringEquals("$.order.status", "INVENTORY_UNAVAILABLE"),
@@ -1126,7 +1562,32 @@ export class MarketplaceCheckoutStack extends Stack {
         cause: "Inventory returned an unsupported reservation outcome.",
         error: "InventoryInvariantViolation",
       })));
-    const workflowDefinition = createPendingOrder.next(reserveInventory);
+    const reconciliationReplayTargets: Record<ReconciliationWorkflowStep, IChainable> = {
+      RELEASE_INVENTORY: replayReleaseCompensatingInventory,
+      CANCEL_PAYMENT_AUTHORIZATION: replayCancelPaymentAuthorization,
+      CANCEL_FULFILLMENT_RESERVATION: replayCancelFulfillmentReservation,
+      REFUND_CAPTURED_PAYMENT: replayRefundCapturedPayment,
+      HANDOFF_FULFILLMENT: handoffFulfillment,
+      CONFIRM_ORDER: markOrderConfirmed,
+    };
+    const reconciliationReplayRoute = new Choice(this, "ReconciliationReplayRoute");
+    for (const requiredAction of Object.keys(
+      reconciliationRecoveryPlan,
+    ) as ReconciliationRequiredAction[]) {
+      reconciliationReplayRoute.when(
+        Condition.stringEquals("$.reconciliationReplay.requiredAction", requiredAction),
+        reconciliationReplayTargets[
+          reconciliationRecoveryPlan[requiredAction].workflowStep
+        ],
+      );
+    }
+    reconciliationReplayRoute.otherwise(new Fail(this, "ReconciliationReplayRejected", {
+        cause: "Reconciliation requested an unsupported recovery action.",
+        error: "ReconciliationInvariantViolation",
+      }));
+    const workflowDefinition = new Choice(this, "WorkflowEntry")
+      .when(Condition.isPresent("$.reconciliationReplay"), reconciliationReplayRoute)
+      .otherwise(createPendingOrder.next(reserveInventory));
     const stateMachine = new StateMachine(this, "CheckoutWorkflow", {
       definitionBody: DefinitionBody.fromChainable(workflowDefinition),
       logs: {
@@ -1162,6 +1623,16 @@ export class MarketplaceCheckoutStack extends Stack {
         resources: [`${fulfillmentFunction.functionArn}:*`],
       }),
     );
+    stateMachine.addToRolePolicy(
+      new PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [`${reconciliationFunction.functionArn}:*`],
+      }),
+    );
+    reconciliationReplay.addToRolePolicy(new PolicyStatement({
+      actions: ["states:StartExecution"],
+      resources: [stateMachine.stateMachineArn, `${stateMachine.stateMachineArn}:*`],
+    }));
 
     const workflowVersion = new CfnStateMachineVersion(this, "CheckoutWorkflowVersion", {
       description:
@@ -1239,6 +1710,10 @@ export class MarketplaceCheckoutStack extends Stack {
         title: "Checkout workflow outcomes",
         left: [stateMachine.metricStarted(), stateMachine.metricSucceeded(), stateMachine.metricFailed()],
       }),
+      new GraphWidget({
+        title: "Actionable reconciliation work",
+        left: [reconciliationRequiredMetric.metric()],
+      }),
     );
 
     new CfnOutput(this, "CheckoutApiUrl", { value: api.url });
@@ -1252,6 +1727,7 @@ export class MarketplaceCheckoutStack extends Stack {
     new CfnOutput(this, "OrderEventSource", { value: orderEventSource });
     new CfnOutput(this, "OrderPendingEventType", { value: orderPendingEventType });
     new CfnOutput(this, "OrderTableName", { value: orderTable.tableName });
+    new CfnOutput(this, "SagaTableName", { value: sagaTable.tableName });
     new CfnOutput(this, "OrderOutboxTableName", { value: orderOutboxTable.tableName });
     new CfnOutput(this, "InventoryTableName", { value: inventoryTable.tableName });
     new CfnOutput(this, "InventoryOutboxTableName", { value: inventoryOutboxTable.tableName });
@@ -1275,6 +1751,17 @@ export class MarketplaceCheckoutStack extends Stack {
     new CfnOutput(this, "FulfillmentQueueUrl", { value: fulfillmentQueue.queueUrl });
     new CfnOutput(this, "FulfillmentWorkerFunctionName", {
       value: fulfillmentWorker.functionName,
+    });
+    new CfnOutput(this, "ReconciliationTableName", { value: reconciliationTable.tableName });
+    new CfnOutput(this, "ReconciliationOutboxTableName", {
+      value: reconciliationOutboxTable.tableName,
+    });
+    new CfnOutput(this, "ReconciliationEventSource", { value: reconciliationEventSource });
+    new CfnOutput(this, "ReconciliationReplayFunctionName", {
+      value: reconciliationReplay.functionName,
+    });
+    new CfnOutput(this, "ReconciliationRequiredAlarmName", {
+      value: reconciliationRequiredAlarm.alarmName,
     });
     new CfnOutput(this, "FakePaymentProviderTableName", {
       value: fakePaymentProviderTable.tableName,

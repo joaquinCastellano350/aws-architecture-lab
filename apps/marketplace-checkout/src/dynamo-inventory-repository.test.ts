@@ -11,6 +11,37 @@ import { describe, expect, it } from "vitest";
 import { DynamoInventoryRepository } from "./dynamo-inventory-repository.js";
 
 describe("Inventory persistence", () => {
+  it("supports a deployed fail-before-release plan without changing domain state", async () => {
+    const client = {
+      async send(command: unknown) {
+        if (command instanceof GetCommand) {
+          const key = command.input.Key?.recordKey;
+          if (key === "FAILURE_PLAN#inventory:reservation-checkout-123:release") {
+            return { Item: { effects: ["FAIL_BEFORE_MUTATION"] } };
+          }
+          return {};
+        }
+        if (command instanceof PutCommand) return {};
+        if (command instanceof UpdateCommand) return { Attributes: {} };
+        throw new Error("Failure plan must stop before the domain transaction");
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const inventory = new DynamoInventoryRepository("inventory", "inventory-outbox", {
+      client,
+      failurePlanTableName: "failure-plans",
+    });
+
+    await expect(inventory.execute({
+      schemaVersion: "1.0",
+      commandType: "ReleaseInventory",
+      operationId: "compensate-inventory-checkout-123",
+      checkoutId: "checkout-123",
+      reservationId: "reservation-checkout-123",
+      releaseReason: "COMPENSATION",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    })).rejects.toMatchObject({ name: "TransactionConflictException" });
+  });
   it("allows exactly one checkout to reserve the final unit", async () => {
     const dynamo = new InventoryDynamoHarness(1);
     const inventory = repository(dynamo);

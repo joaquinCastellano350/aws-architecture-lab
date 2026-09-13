@@ -12,3 +12,6 @@ export * from "./generated/fulfillment-command.js";
 export * from "./generated/fulfillment-event.js";
 export * from "./generated/order-command.js";
 export * from "./generated/order-event.js";
+export * from "./generated/reconciliation-command.js";
+export * from "./generated/reconciliation-event.js";
+export * from "./reconciliation-recovery.js";

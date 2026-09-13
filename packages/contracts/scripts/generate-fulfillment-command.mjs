@@ -6,6 +6,7 @@ const definitions = await Promise.all([
   load("reserve-fulfillment-command.v1.json", "validateReserveFulfillmentCommand"),
   load("cancel-fulfillment-command.v1.json", "validateCancelFulfillmentCommand"),
   load("handoff-fulfillment-command.v1.json", "validateHandoffFulfillmentCommand"),
+  load("retrieve-fulfillment-command.v1.json", "validateRetrieveFulfillmentCommand"),
   load("fulfillment-command-outcome.v1.json", "validateFulfillmentCommandOutcome"),
 ]);
 const lines = [
@@ -15,7 +16,7 @@ const lines = [
 
 for (const { schema } of definitions) lines.push(...interfaceLines(schema.title, schema));
 lines.push(
-  "export type FulfillmentCommand = ReserveFulfillmentCommand | CancelFulfillmentCommand | HandoffFulfillmentCommand;",
+  "export type FulfillmentCommand = ReserveFulfillmentCommand | CancelFulfillmentCommand | HandoffFulfillmentCommand | RetrieveFulfillmentCommand;",
   "",
   "export type FulfillmentContractValidationResult<T> =",
   "  | { readonly ok: true; readonly value: T }",

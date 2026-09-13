@@ -9,6 +9,7 @@ const definitions = await Promise.all([
   load("order-confirmed-event.v1.json", "validateOrderConfirmedEvent"),
   load("order-compensating-event.v1.json", "validateOrderCompensatingEvent"),
   load("order-cancelled-event.v1.json", "validateOrderCancelledEvent"),
+  load("order-reconciliation-required-event.v1.json", "validateOrderReconciliationRequiredEvent"),
 ]);
 const lines = [
   "// Generated from schemas/order-*-event.v1.json. Do not edit by hand.",
