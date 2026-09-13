@@ -114,6 +114,31 @@ describe("domain outbox publisher", () => {
     }));
   });
 
+  it("publishes a confirmed Order cancellation fact", async () => {
+    const sent: PutEventsCommand[] = [];
+    const eventBridge = {
+      async send(command: PutEventsCommand) {
+        sent.push(command);
+        return { Entries: [{ EventId: "eventbridge-cancelled" }] };
+      },
+    } as unknown as EventBridgeClient;
+    const publish = createOutboxPublisher({
+      eventBridge,
+      eventBusName: "checkout-events",
+      eventSource: "aws-architecture-lab.order",
+    });
+
+    await expect(publish({ Records: [streamRecord("cancelled-stream", {
+      ...orderPendingEvent("order-cancelled-1", "checkout-1"),
+      eventType: "OrderCancelled",
+      payload: { status: "CANCELLED" },
+    })] })).resolves.toEqual({ batchItemFailures: [] });
+    expect(sent[0]?.input.Entries?.[0]).toEqual(expect.objectContaining({
+      Source: "aws-architecture-lab.order",
+      DetailType: "OrderCancelled",
+    }));
+  });
+
   it("reports malformed records for retry without publishing them", async () => {
     const eventBridge = {
       async send() {

@@ -110,7 +110,8 @@ authorize, capture, cancel, and refund, so repeated requests preserve one econom
 Sandbox failure plans are durable records in a dedicated table under the `FAILURE_PLAN#`
 key namespace. They can be changed only through the output
 `FakePaymentFailurePlanRoleArn`; the Payment Lambda has read-only access and consumes them
-to model rejection, throttling, timeout, and commit-then-response-loss. Production-reference
+  to model fail-before-mutation, business rejection, throttling, timeout, duplicate delivery,
+  and ambiguous completion. Production-reference
 synthesis disables this test control plane with `enableFakePaymentFailurePlans: false`.
 The workflow enters capture only after a typed Fulfillment capacity reservation. It then
 commits Inventory and sends a versioned handoff command with a Step Functions task token
@@ -119,7 +120,13 @@ irreversible handoff idempotently, and completes the callback before Order becom
 `CONFIRMED`. Task tokens are never placed in message attributes, logs, traces, metrics,
 errors, URLs, or persistence.
 
-The OpenAPI 3.0 contract exposes the `CONFIRMED` and `EXPIRED` customer outcomes while
+Before Payment capture, failure is terminal but fully reversible. Inventory rejection ends
+without compensation. Payment authorization rejection or bounded retry exhaustion releases
+Inventory once. Fulfillment reservation failure cancels the authorization and then releases
+Inventory in reverse order. Stable operation IDs make every compensation idempotent, and the
+Order becomes `CANCELLED` only after all required compensation outcomes are confirmed.
+
+The OpenAPI 4.0 contract exposes `CANCELLED`, `CONFIRMED`, and `EXPIRED` customer outcomes while
 continuing to accept the existing v1 submission schema. Reservations carry a five-minute business deadline. The
 workflow releases a reservation that reaches the deadline before commit and exposes the
 Order as `EXPIRED`. A one-minute
@@ -136,6 +143,7 @@ npm run workload:synth
 npm run workload:deploy
 npm run workload:smoke
 npm run workload:expiry
+npm run workload:failure
 npm run workload:destroy
 ```
 
@@ -152,3 +160,10 @@ that the foundation stack remains.
 an abandoned reservation, duplicate sweeps, duplicate release delivery, and a real DynamoDB
 commit-versus-expiry race. It uses four uniquely named checkouts and requires
 `CHECKOUT_REQUEST_CEILING` to be at least `4`.
+
+`workload:failure` runs eight deployed scenarios through the immutable workflow alias. It
+asserts Inventory rejection, all deterministic Payment failure effects, ambiguous-result
+reconciliation, Fulfillment-reservation failure, reverse-order compensation, terminal Order
+status, durable operation-ledger results, emitted outbox facts, and bounded state transitions.
+It writes provider plans only through the narrowly scoped test role and requires
+`CHECKOUT_REQUEST_CEILING` to be at least `8`.

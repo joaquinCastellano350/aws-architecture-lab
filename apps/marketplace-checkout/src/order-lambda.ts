@@ -1,10 +1,12 @@
 import type { Handler } from "aws-lambda";
 import {
   validateCreatePendingOrderCommand,
+  validateMarkOrderCancelledCommand,
   validateMarkOrderConfirmedCommand,
   validateMarkOrderExpiredCommand,
   validateMarkOrderInventoryUnavailableCommand,
   type CreatePendingOrderOutcome,
+  type MarkOrderCancelledOutcome,
   type MarkOrderConfirmedOutcome,
   type MarkOrderExpiredOutcome,
   type MarkOrderInventoryUnavailableOutcome,
@@ -12,6 +14,7 @@ import {
 
 import {
   createPendingOrder,
+  markOrderCancelled,
   markOrderConfirmed,
   markOrderExpired,
   markOrderInventoryUnavailable,
@@ -25,10 +28,16 @@ const outboxTableName = requiredEnvironment("ORDER_OUTBOX_TABLE_NAME");
 export const handler: Handler<
   unknown,
   | CreatePendingOrderOutcome
+  | MarkOrderCancelledOutcome
   | MarkOrderInventoryUnavailableOutcome
   | MarkOrderExpiredOutcome
   | MarkOrderConfirmedOutcome
 > = async (event) => {
+  if (commandTypeOf(event) === "MarkOrderCancelled") {
+    const validation = validateMarkOrderCancelledCommand(event);
+    if (!validation.ok) throw new Error(validation.error);
+    return markOrderCancelled(orderTableName, outboxTableName, validation.value);
+  }
   if (commandTypeOf(event) === "MarkOrderConfirmed") {
     const validation = validateMarkOrderConfirmedCommand(event);
     if (!validation.ok) throw new Error(validation.error);

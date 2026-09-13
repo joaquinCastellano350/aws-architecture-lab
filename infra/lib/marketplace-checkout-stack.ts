@@ -691,9 +691,47 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(releaseExpiredInventory);
+    const cancelPaymentAuthorization = new LambdaInvoke(this, "CancelPaymentAuthorization", {
+      lambdaFunction: paymentFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "CancelPayment",
+        operationId: JsonPath.format("compensate-payment-{}", JsonPath.stringAt("$.checkoutId")),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        paymentId: JsonPath.format("payment-{}", JsonPath.stringAt("$.checkoutId")),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.paymentCancellation",
+      retryOnServiceExceptions: false,
+    });
+    this.addPaymentCommandRetry(cancelPaymentAuthorization);
+    const releaseCompensatingInventory = new LambdaInvoke(
+      this,
+      "ReleaseCompensatingInventory",
+      {
+        lambdaFunction: inventoryFunctionVersion as IFunction,
+        payload: TaskInput.fromObject({
+          schemaVersion: "1.0",
+          commandType: "ReleaseInventory",
+          operationId: JsonPath.format(
+            "compensate-inventory-{}",
+            JsonPath.stringAt("$.checkoutId"),
+          ),
+          checkoutId: JsonPath.stringAt("$.checkoutId"),
+          reservationId: JsonPath.stringAt("$.inventoryReservation.reservationId"),
+          releaseReason: "COMPENSATION",
+          correlationId: JsonPath.stringAt("$.correlationId"),
+          causationId: JsonPath.stringAt("$$.Execution.Id"),
+        }),
+        payloadResponseOnly: true,
+        resultPath: "$.inventoryCompensation",
+        retryOnServiceExceptions: false,
+      },
+    );
+    this.addInternalCommandRetry(releaseCompensatingInventory);
     const inventoryUnavailable = new Succeed(this, "InventoryUnavailable");
-    const paymentAuthorized = new Succeed(this, "PaymentAuthorized");
-    const paymentRejected = new Succeed(this, "PaymentRejected");
     const markOrderInventoryUnavailable = new LambdaInvoke(this, "MarkOrderInventoryUnavailable", {
       lambdaFunction: orderFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
@@ -712,6 +750,21 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(markOrderInventoryUnavailable);
+    const markOrderCancelled = new LambdaInvoke(this, "MarkOrderCancelled", {
+      lambdaFunction: orderFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "MarkOrderCancelled",
+        operationId: JsonPath.format("cancel-order-{}", JsonPath.stringAt("$.checkoutId")),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.order",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(markOrderCancelled);
     const markOrderExpired = new LambdaInvoke(this, "MarkOrderExpired", {
       lambdaFunction: orderFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
@@ -746,7 +799,39 @@ export class MarketplaceCheckoutStack extends Stack {
     });
     this.addInternalCommandRetry(markOrderConfirmed);
     const orderExpired = new Succeed(this, "OrderExpired");
+    const checkoutCancelled = new Succeed(this, "CheckoutCancelled");
     const checkoutConfirmed = new Succeed(this, "CheckoutConfirmed");
+    markOrderCancelled.next(new Choice(this, "OrderCancellationOutcome")
+      .when(Condition.stringEquals("$.order.status", "CANCELLED"), checkoutCancelled)
+      .otherwise(new Fail(this, "OrderCancellationRejected", {
+        cause: "Order returned an unsupported cancellation outcome.",
+        error: "OrderInvariantViolation",
+      })));
+    releaseCompensatingInventory.next(new Choice(this, "CompensatingInventoryReleaseOutcome")
+      .when(
+        Condition.stringEquals("$.inventoryCompensation.status", "RELEASED"),
+        markOrderCancelled,
+      )
+      .when(Condition.and(
+        Condition.stringEquals(
+          "$.inventoryCompensation.status",
+          "RESERVATION_NOT_ACTIVE",
+        ),
+        Condition.stringEquals("$.inventoryCompensation.reservationStatus", "RELEASED"),
+      ), markOrderCancelled)
+      .otherwise(new Fail(this, "CompensatingInventoryReleaseRejected", {
+        cause: "Inventory release was not confirmed, so the Order remains pending.",
+        error: "InventoryCompensationFailure",
+      })));
+    cancelPaymentAuthorization.next(new Choice(this, "PaymentCancellationOutcome")
+      .when(
+        Condition.stringEquals("$.paymentCancellation.status", "CANCELLED"),
+        releaseCompensatingInventory,
+      )
+      .otherwise(new Fail(this, "PaymentCancellationRejected", {
+        cause: "Payment cancellation was not confirmed, so later compensation did not run.",
+        error: "PaymentCompensationFailure",
+      })));
     markOrderConfirmed.next(new Choice(this, "OrderConfirmationOutcome")
       .when(Condition.stringEquals("$.order.status", "CONFIRMED"), checkoutConfirmed)
       .otherwise(new Fail(this, "OrderConfirmationRejected", {
@@ -844,18 +929,27 @@ export class MarketplaceCheckoutStack extends Stack {
         Condition.stringEquals("$.fulfillmentReservation.status", "RESERVED"),
         capturePayment,
       )
-      .otherwise(paymentAuthorized);
+      .otherwise(cancelPaymentAuthorization);
     reserveFulfillment.next(fulfillmentCapacityOutcome);
+    reserveFulfillment.addCatch(cancelPaymentAuthorization, {
+      resultPath: "$.fulfillmentReservationError",
+    });
     authorizePayment.next(new Choice(this, "PaymentAuthorizationOutcome")
       .when(
         Condition.stringEquals("$.paymentAuthorization.status", "AUTHORIZED"),
         reserveFulfillment,
       )
-      .when(Condition.stringEquals("$.paymentAuthorization.status", "REJECTED"), paymentRejected)
+      .when(
+        Condition.stringEquals("$.paymentAuthorization.status", "REJECTED"),
+        releaseCompensatingInventory,
+      )
       .otherwise(new Fail(this, "PaymentAuthorizationRejected", {
         cause: "Payment returned an unsupported authorization outcome.",
         error: "PaymentAuthorizationFailure",
       })));
+    authorizePayment.addCatch(releaseCompensatingInventory, {
+      resultPath: "$.paymentAuthorizationError",
+    });
     reserveInventory.next(new Choice(this, "InventoryReservationOutcome")
       .when(
         Condition.stringEquals("$.inventoryReservation.status", "RESERVED"),
@@ -995,13 +1089,16 @@ export class MarketplaceCheckoutStack extends Stack {
     new CfnOutput(this, "OrderEventSource", { value: orderEventSource });
     new CfnOutput(this, "OrderPendingEventType", { value: orderPendingEventType });
     new CfnOutput(this, "OrderTableName", { value: orderTable.tableName });
+    new CfnOutput(this, "OrderOutboxTableName", { value: orderOutboxTable.tableName });
     new CfnOutput(this, "InventoryTableName", { value: inventoryTable.tableName });
+    new CfnOutput(this, "InventoryOutboxTableName", { value: inventoryOutboxTable.tableName });
     new CfnOutput(this, "InventoryEventSource", { value: inventoryEventSource });
     new CfnOutput(this, "InventoryCommandFunctionName", { value: inventoryFunction.functionName });
     new CfnOutput(this, "InventoryExpiryWorkerFunctionName", {
       value: inventoryExpiryWorker.functionName,
     });
     new CfnOutput(this, "PaymentTableName", { value: paymentTable.tableName });
+    new CfnOutput(this, "PaymentOutboxTableName", { value: paymentOutboxTable.tableName });
     new CfnOutput(this, "PaymentEventSource", { value: paymentEventSource });
     new CfnOutput(this, "PaymentCommandFunctionName", { value: paymentFunction.functionName });
     new CfnOutput(this, "FulfillmentTableName", { value: fulfillmentTable.tableName });
@@ -1095,6 +1192,7 @@ export class MarketplaceCheckoutStack extends Stack {
         "InternalServerError",
         "PaymentProviderThrottledError",
         "PaymentProviderTimeoutError",
+        "PaymentProviderTransientError",
         "PaymentProviderResponseLostError",
       ],
       interval: Duration.seconds(1),

@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createPendingOrder,
+  markOrderCancelled,
   markOrderConfirmed,
   markOrderExpired,
   markOrderInventoryUnavailable,
@@ -245,6 +246,52 @@ describe("Order persistence", () => {
             eventId: "event-confirmed",
             eventType: "OrderConfirmed",
             payload: { status: "CONFIRMED" },
+          }),
+        }),
+      }),
+    ]));
+  });
+
+  it("marks the Order cancelled only after compensation and publishes the fact atomically", async () => {
+    const sent: unknown[] = [];
+    const client = {
+      async send(command: unknown) {
+        sent.push(command);
+        if (command instanceof GetCommand) return {};
+        return {};
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    const order = await markOrderCancelled("orders", "order-outbox", {
+      schemaVersion: "1.0",
+      commandType: "MarkOrderCancelled",
+      operationId: "cancel-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    }, {
+      client,
+      clock: () => new Date("2026-09-12T12:00:00.000Z"),
+      eventId: () => "event-cancelled",
+    });
+
+    expect(order.status).toBe("CANCELLED");
+    const transaction = sent.find(
+      (command): command is TransactWriteCommand => command instanceof TransactWriteCommand,
+    );
+    expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Update: expect.objectContaining({
+          ConditionExpression: "#status = :pending AND correlationId = :correlationId",
+        }),
+      }),
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          TableName: "order-outbox",
+          Item: expect.objectContaining({
+            eventId: "event-cancelled",
+            eventType: "OrderCancelled",
+            payload: { status: "CANCELLED" },
           }),
         }),
       }),

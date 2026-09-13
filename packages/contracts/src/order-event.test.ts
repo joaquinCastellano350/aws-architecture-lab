@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   validateOrderInventoryUnavailableEvent,
+  validateOrderCancelledEvent,
   validateOrderExpiredEvent,
   validateOrderPendingEvent,
 } from "./generated/order-event.js";
@@ -59,6 +60,20 @@ describe("Order event JSON schema", () => {
       aggregateType: "Order",
       aggregateId: "checkout-123",
       payload: { status: "EXPIRED" },
+    }).ok).toBe(true);
+  });
+
+  it("accepts a customer-visible confirmed cancellation fact", () => {
+    expect(validateOrderCancelledEvent({
+      eventId: "event-cancelled",
+      eventType: "OrderCancelled",
+      eventVersion: "1.0",
+      occurredAt: "2026-09-12T12:00:00.000Z",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+      aggregateType: "Order",
+      aggregateId: "checkout-123",
+      payload: { status: "CANCELLED" },
     }).ok).toBe(true);
   });
 

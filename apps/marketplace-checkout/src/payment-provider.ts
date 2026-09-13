@@ -44,8 +44,11 @@ export interface PaymentProvider {
 
 export type PaymentProviderFailureEffect =
   | "BUSINESS_REJECTION"
+  | "FAIL_BEFORE_MUTATION"
   | "THROTTLE"
   | "TIMEOUT"
+  | "DUPLICATE_DELIVERY"
+  | "AMBIGUOUS_COMPLETION"
   | "COMMIT_THEN_LOST_RESPONSE";
 
 export interface DeterministicPaymentProviderOptions {
@@ -159,6 +162,7 @@ export class DeterministicPaymentProvider implements PaymentProvider {
     }
 
     const effect = this.#nextEffect(request.operationKey);
+    if (effect === "FAIL_BEFORE_MUTATION") throw new PaymentProviderTransientError();
     if (effect === "THROTTLE") throw new PaymentProviderThrottledError();
     if (effect === "TIMEOUT") throw new PaymentProviderTimeoutError();
 
@@ -172,7 +176,10 @@ export class DeterministicPaymentProvider implements PaymentProvider {
         this.mutationCount(request.operationKey) + 1,
       );
     }
-    if (effect === "COMMIT_THEN_LOST_RESPONSE") throw new PaymentProviderResponseLostError();
+    if (effect === "DUPLICATE_DELIVERY") return this.#mutate(request, applyMutation);
+    if (effect === "AMBIGUOUS_COMPLETION" || effect === "COMMIT_THEN_LOST_RESPONSE") {
+      throw new PaymentProviderResponseLostError();
+    }
     return result;
   }
 
@@ -180,6 +187,13 @@ export class DeterministicPaymentProvider implements PaymentProvider {
     const attempt = this.#attempts.get(operationKey) ?? 0;
     this.#attempts.set(operationKey, attempt + 1);
     return this.#failurePlan[operationKey]?.[attempt];
+  }
+}
+
+export class PaymentProviderTransientError extends Error {
+  public constructor() {
+    super("Payment provider failed before applying the operation");
+    this.name = "PaymentProviderTransientError";
   }
 }
 

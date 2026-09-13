@@ -7,5 +7,6 @@ maintained independently.
 
 The contracts currently define versioned Order, Inventory, Payment, and Fulfillment
 commands, outcomes, and committed-fact envelopes. Fulfillment keeps reservation and
-irreversible-handoff contracts independent of the SQS callback envelope. Later increments
-add compensation schemas without changing these v1 contracts in place.
+irreversible-handoff contracts independent of the SQS callback envelope. Confirmed pre-capture
+compensation adds an Order cancellation command, outcome, and fact without changing earlier v1
+contracts in place.

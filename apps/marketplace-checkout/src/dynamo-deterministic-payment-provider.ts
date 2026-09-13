@@ -20,6 +20,7 @@ import type {
 } from "./payment-provider.js";
 import {
   PaymentProviderResponseLostError,
+  PaymentProviderTransientError,
   PaymentProviderThrottledError,
   PaymentProviderTimeoutError,
 } from "./payment-provider.js";
@@ -69,7 +70,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
     const replay = await this.#replay(request);
     if (replay !== undefined) return replay;
     const planned = await this.#plannedFailure(request);
-    if (planned !== undefined && planned !== "COMMIT_THEN_LOST_RESPONSE") return planned;
+    if (isPlannedOutcome(planned)) return planned;
     const payment: ProviderPayment = {
       recordKey: paymentKey(request.paymentId),
       recordType: "PROVIDER_PAYMENT",
@@ -86,7 +87,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
         Item: payment,
         ConditionExpression: "attribute_not_exists(recordKey)",
       },
-    }, planned === "COMMIT_THEN_LOST_RESPONSE");
+    }, isAmbiguousCompletion(planned), planned === "DUPLICATE_DELIVERY");
   }
 
   public capture(request: MutateProviderPayment): Promise<PaymentProviderMutationResult> {
@@ -101,7 +102,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
     const replay = await this.#replay(request);
     if (replay !== undefined) return replay;
     const planned = await this.#plannedFailure(request);
-    if (planned !== undefined && planned !== "COMMIT_THEN_LOST_RESPONSE") return planned;
+    if (isPlannedOutcome(planned)) return planned;
     const payment = await this.#payment(request.paymentId);
     if (payment?.status !== "CAPTURED" || request.amountMinor > payment.amountMinor) {
       return this.#recordRejection(request, "PAYMENT_NOT_REFUNDABLE");
@@ -111,7 +112,8 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
       payment,
       "CAPTURED",
       "REFUNDED",
-      planned === "COMMIT_THEN_LOST_RESPONSE",
+      isAmbiguousCompletion(planned),
+      planned === "DUPLICATE_DELIVERY",
     );
   }
 
@@ -137,7 +139,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
     const replay = await this.#replay(request);
     if (replay !== undefined) return replay;
     const planned = await this.#plannedFailure(request);
-    if (planned !== undefined && planned !== "COMMIT_THEN_LOST_RESPONSE") return planned;
+    if (isPlannedOutcome(planned)) return planned;
     const payment = await this.#payment(request.paymentId);
     if (payment?.status !== requiredStatus) return this.#recordRejection(request, rejectionCode);
     return this.#transitionApplied(
@@ -145,7 +147,8 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
       payment,
       requiredStatus,
       targetStatus,
-      planned === "COMMIT_THEN_LOST_RESPONSE",
+      isAmbiguousCompletion(planned),
+      planned === "DUPLICATE_DELIVERY",
     );
   }
 
@@ -155,6 +158,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
     requiredStatus: PaymentProviderStatus,
     targetStatus: PaymentProviderStatus,
     loseResponse: boolean,
+    duplicateDelivery: boolean,
   ): Promise<PaymentProviderMutationResult> {
     const result: PaymentProviderMutationResult = {
       kind: "APPLIED",
@@ -170,7 +174,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":requiredStatus": requiredStatus, ":targetStatus": targetStatus },
       },
-    }, loseResponse);
+    }, loseResponse, duplicateDelivery);
   }
 
   async #recordRejection(
@@ -196,6 +200,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
     result: PaymentProviderMutationResult,
     mutation: Record<string, unknown>,
     loseResponse = false,
+    duplicateDelivery = false,
   ): Promise<PaymentProviderMutationResult> {
     try {
       await this.#client.send(new TransactWriteCommand({
@@ -211,6 +216,11 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
         ],
       }));
       if (loseResponse) throw new PaymentProviderResponseLostError();
+      if (duplicateDelivery) {
+        const replay = await this.#replay(request);
+        if (replay === undefined) throw new Error("Duplicate provider delivery lost its result");
+        return replay;
+      }
       return result;
     } catch (error) {
       if (!isTransactionConflict(error)) throw error;
@@ -220,9 +230,10 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
 
   async #plannedFailure(
     request: AuthorizeProviderPayment | MutateProviderPayment | RefundProviderPayment,
-  ): Promise<"COMMIT_THEN_LOST_RESPONSE" | PaymentProviderMutationResult | undefined> {
+  ): Promise<PaymentProviderFailureEffect | PaymentProviderMutationResult | undefined> {
     const effect = await this.#nextFailureEffect(request.operationKey);
     if (effect === undefined) return undefined;
+    if (effect === "FAIL_BEFORE_MUTATION") throw new PaymentProviderTransientError();
     if (effect === "THROTTLE") throw new PaymentProviderThrottledError();
     if (effect === "TIMEOUT") throw new PaymentProviderTimeoutError();
     if (effect === "BUSINESS_REJECTION") {
@@ -342,9 +353,24 @@ function failureAttemptKey(operationKeyValue: string): string {
 
 function isFailureEffect(value: unknown): value is PaymentProviderFailureEffect {
   return value === "BUSINESS_REJECTION" ||
+    value === "FAIL_BEFORE_MUTATION" ||
     value === "THROTTLE" ||
     value === "TIMEOUT" ||
+    value === "DUPLICATE_DELIVERY" ||
+    value === "AMBIGUOUS_COMPLETION" ||
     value === "COMMIT_THEN_LOST_RESPONSE";
+}
+
+function isAmbiguousCompletion(
+  planned: PaymentProviderFailureEffect | PaymentProviderMutationResult | undefined,
+): boolean {
+  return planned === "AMBIGUOUS_COMPLETION" || planned === "COMMIT_THEN_LOST_RESPONSE";
+}
+
+function isPlannedOutcome(
+  planned: PaymentProviderFailureEffect | PaymentProviderMutationResult | undefined,
+): planned is PaymentProviderMutationResult {
+  return typeof planned === "object";
 }
 
 function isConditionalConflict(error: unknown): boolean {

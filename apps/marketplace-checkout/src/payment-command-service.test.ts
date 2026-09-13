@@ -50,7 +50,7 @@ describe("Payment command boundary", () => {
   it("reconciles an abandoned capture before attempting a refund", async () => {
     const ledger = new MemoryPaymentLedger();
     const provider = new DeterministicPaymentProvider({
-      failurePlan: { "payment:payment-123:capture": ["COMMIT_THEN_LOST_RESPONSE"] },
+      failurePlan: { "payment:payment-123:capture": ["AMBIGUOUS_COMPLETION"] },
     });
     const payment = service(ledger, provider);
     await payment.execute(authorizeCommand());
@@ -75,7 +75,7 @@ describe("Payment command boundary", () => {
   it("returns the committed result when an ambiguous capture itself is replayed", async () => {
     const ledger = new MemoryPaymentLedger();
     const provider = new DeterministicPaymentProvider({
-      failurePlan: { "payment:payment-123:capture": ["COMMIT_THEN_LOST_RESPONSE"] },
+      failurePlan: { "payment:payment-123:capture": ["AMBIGUOUS_COMPLETION"] },
     });
     const payment = service(ledger, provider);
     await payment.execute(authorizeCommand());

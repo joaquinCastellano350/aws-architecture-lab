@@ -7,6 +7,8 @@ import {
   validateMarkOrderExpiredOutcome,
   validateMarkOrderConfirmedCommand,
   validateMarkOrderConfirmedOutcome,
+  validateMarkOrderCancelledCommand,
+  validateMarkOrderCancelledOutcome,
   validateMarkOrderInventoryUnavailableCommand,
   validateMarkOrderInventoryUnavailableOutcome,
 } from "./generated/order-command.js";
@@ -85,6 +87,23 @@ describe("Order command JSON schemas", () => {
       checkoutId: "checkout-123",
       correlationId: "corr-123",
       status: "CONFIRMED",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the typed Order cancellation command and outcome", () => {
+    expect(validateMarkOrderCancelledCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderCancelled",
+      operationId: "cancel-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderCancelledOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "CANCELLED",
     }).ok).toBe(true);
   });
 

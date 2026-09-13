@@ -2,11 +2,15 @@ import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import {
   validateInventoryEvent,
+  validateOrderCancelledEvent,
+  validateOrderConfirmedEvent,
   validateOrderExpiredEvent,
   validateOrderInventoryUnavailableEvent,
   validateOrderPendingEvent,
   validatePaymentEvent,
   type InventoryEvent,
+  type OrderCancelledEvent,
+  type OrderConfirmedEvent,
   type OrderExpiredEvent,
   type OrderInventoryUnavailableEvent,
   type OrderPendingEvent,
@@ -28,6 +32,8 @@ export interface OutboxPublisherDependencies {
 
 type DomainEvent =
   | InventoryEvent
+  | OrderCancelledEvent
+  | OrderConfirmedEvent
   | OrderExpiredEvent
   | OrderInventoryUnavailableEvent
   | OrderPendingEvent
@@ -103,10 +109,17 @@ function validateDomainEvent(
   input: unknown,
 ): { readonly ok: true; readonly value: DomainEvent } | { readonly ok: false } {
   if (eventSource === "aws-architecture-lab.order") {
-    const pending = validateOrderPendingEvent(input);
-    if (pending.ok) return pending;
-    const unavailable = validateOrderInventoryUnavailableEvent(input);
-    return unavailable.ok ? unavailable : validateOrderExpiredEvent(input);
+    for (const validate of [
+      validateOrderPendingEvent,
+      validateOrderInventoryUnavailableEvent,
+      validateOrderExpiredEvent,
+      validateOrderCancelledEvent,
+      validateOrderConfirmedEvent,
+    ]) {
+      const result = validate(input);
+      if (result.ok) return result;
+    }
+    return { ok: false };
   }
   if (eventSource === "aws-architecture-lab.inventory") return validateInventoryEvent(input);
   if (eventSource === "aws-architecture-lab.payment") return validatePaymentEvent(input);

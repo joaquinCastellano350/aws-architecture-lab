@@ -10,6 +10,36 @@ import {
 const template = workloadTemplate();
 
 describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
+  it("compensates every reversible reservation before cancelling the Order", () => {
+    const definition = JSON.stringify(
+      Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
+    );
+
+    expect(definition).toContain("CancelPaymentAuthorization");
+    expect(definition).toContain("PaymentCancellationOutcome");
+    expect(definition).toContain("ReleaseCompensatingInventory");
+    expect(definition).toContain("CompensatingInventoryReleaseOutcome");
+    expect(definition).toContain("MarkOrderCancelled");
+    expect(definition).toContain("OrderCancellationOutcome");
+    expect(definition).toContain("CheckoutCancelled");
+    expect(definition).toContain("compensate-payment-{}");
+    expect(definition).toContain("compensate-inventory-{}");
+    expect(definition).toContain("cancel-order-{}");
+    expect(definition).toMatch(/PaymentAuthorizationOutcome.*REJECTED.*ReleaseCompensatingInventory/);
+    expect(definition).toMatch(/FulfillmentCapacityOutcome.*CancelPaymentAuthorization/);
+    expect(definition).toMatch(/PaymentCancellationOutcome.*CANCELLED.*ReleaseCompensatingInventory/);
+    expect(definition).toMatch(/CompensatingInventoryReleaseOutcome.*RELEASED.*MarkOrderCancelled/);
+    expect(definition).toMatch(/OrderCancellationOutcome.*CANCELLED.*CheckoutCancelled/);
+    expect(definition).toContain("PaymentProviderTransientError");
+    for (const output of [
+      "OrderOutboxTableName",
+      "InventoryOutboxTableName",
+      "PaymentOutboxTableName",
+    ]) {
+      template.hasOutput(output, {});
+    }
+  });
+
   it("completes Fulfillment through an encrypted, token-protected callback", () => {
     const functionEntries = Object.entries(template.findResources("AWS::Lambda::Function"));
     const functions = functionEntries.map(([, resource]) => resource);
@@ -113,7 +143,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     expect(capturePayment).toBeGreaterThan(fulfillmentGate);
     expect(commitInventory).toBeGreaterThan(capturePayment);
     expect(definition).toContain("$.fulfillmentReservation.status");
-    expect(definition).toContain("PaymentAuthorized");
+    expect(definition).toContain("AUTHORIZED");
     expect(definition).toContain("CAPTURED");
     expect(definition).toMatch(
       /AuthorizePayment.*TransactionCanceledException.*PaymentProviderThrottledError/,

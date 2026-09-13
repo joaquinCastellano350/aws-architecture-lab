@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   DeterministicPaymentProvider,
   PaymentProviderResponseLostError,
+  PaymentProviderTransientError,
   PaymentProviderThrottledError,
   PaymentProviderTimeoutError,
 } from "./payment-provider.js";
@@ -68,6 +69,7 @@ function providerContract(createProvider: () => DeterministicPaymentProvider): v
   });
 
   it.each([
+    ["FAIL_BEFORE_MUTATION", PaymentProviderTransientError],
     ["THROTTLE", PaymentProviderThrottledError],
     ["TIMEOUT", PaymentProviderTimeoutError],
   ] as const)("models %s before mutation", async (effect, expectedError) => {
@@ -82,9 +84,20 @@ function providerContract(createProvider: () => DeterministicPaymentProvider): v
     );
   });
 
+  it("delivers a planned duplicate through the same idempotent operation", async () => {
+    const provider = new DeterministicPaymentProvider({
+      failurePlan: { "authorize:checkout-123": ["DUPLICATE_DELIVERY"] },
+    });
+
+    await expect(provider.authorize(authorizeRequest())).resolves.toEqual(
+      expect.objectContaining({ kind: "APPLIED", status: "AUTHORIZED" }),
+    );
+    expect(provider.mutationCount("authorize:checkout-123")).toBe(1);
+  });
+
   it("recovers a commit whose response was lost without capturing twice", async () => {
     const provider = new DeterministicPaymentProvider({
-      failurePlan: { "capture:checkout-123": ["COMMIT_THEN_LOST_RESPONSE"] },
+      failurePlan: { "capture:checkout-123": ["AMBIGUOUS_COMPLETION"] },
     });
     await provider.authorize(authorizeRequest());
 

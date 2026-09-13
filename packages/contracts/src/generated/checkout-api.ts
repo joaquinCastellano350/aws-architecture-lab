@@ -1,6 +1,6 @@
 // Generated from openapi/checkout-api.json. Do not edit by hand.
 
-export const checkoutApiVersion = "3.0.0";
+export const checkoutApiVersion = "4.0.0";
 export const checkoutApiPaths = {
   submit: "/checkouts",
   status: "/checkouts/{checkoutId}",
@@ -23,7 +23,7 @@ export interface SubmitCheckoutResponse {
 
 export interface CheckoutStatusResponse {
   readonly checkoutId: string;
-  readonly status: "PENDING" | "INVENTORY_UNAVAILABLE" | "EXPIRED" | "CONFIRMED";
+  readonly status: "PENDING" | "INVENTORY_UNAVAILABLE" | "EXPIRED" | "CANCELLED" | "CONFIRMED";
   readonly correlationId: string;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -100,7 +100,7 @@ export function validateCheckoutStatusResponse(
     typeof input !== "object" ||
     input === null ||
     (typeof (input as Record<string, unknown>)["checkoutId"] !== "string") ||
-    (typeof (input as Record<string, unknown>)["status"] !== "string" || !["PENDING", "INVENTORY_UNAVAILABLE", "EXPIRED", "CONFIRMED"].includes((input as Record<string, unknown>)["status"] as string)) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || !["PENDING", "INVENTORY_UNAVAILABLE", "EXPIRED", "CANCELLED", "CONFIRMED"].includes((input as Record<string, unknown>)["status"] as string)) ||
     (typeof (input as Record<string, unknown>)["correlationId"] !== "string") ||
     (typeof (input as Record<string, unknown>)["createdAt"] !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test((input as Record<string, unknown>)["createdAt"] as string) || Number.isNaN(Date.parse((input as Record<string, unknown>)["createdAt"] as string))) ||
     (typeof (input as Record<string, unknown>)["updatedAt"] !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test((input as Record<string, unknown>)["updatedAt"] as string) || Number.isNaN(Date.parse((input as Record<string, unknown>)["updatedAt"] as string)))

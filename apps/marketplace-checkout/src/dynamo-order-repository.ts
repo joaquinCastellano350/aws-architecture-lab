@@ -9,6 +9,8 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import type {
   CreatePendingOrderCommand,
+  MarkOrderCancelledCommand,
+  MarkOrderCancelledOutcome,
   MarkOrderConfirmedCommand,
   MarkOrderConfirmedOutcome,
   MarkOrderExpiredCommand,
@@ -16,6 +18,7 @@ import type {
   MarkOrderInventoryUnavailableCommand,
   MarkOrderInventoryUnavailableOutcome,
   OrderExpiredEvent,
+  OrderCancelledEvent,
   OrderConfirmedEvent,
   OrderInventoryUnavailableEvent,
   OrderPendingEvent,
@@ -139,17 +142,35 @@ export async function markOrderConfirmed(
   ) as Promise<MarkOrderConfirmedOutcome>;
 }
 
+export async function markOrderCancelled(
+  orderTableName: string,
+  outboxTableName: string,
+  input: MarkOrderCancelledCommand,
+  dependencies: OrderRepositoryDependencies = {},
+): Promise<MarkOrderCancelledOutcome> {
+  return markOrderTerminal(
+    orderTableName,
+    outboxTableName,
+    input,
+    "CANCELLED",
+    dependencies,
+  ) as Promise<MarkOrderCancelledOutcome>;
+}
+
 type TerminalOrderCommand =
   | MarkOrderInventoryUnavailableCommand
   | MarkOrderExpiredCommand
+  | MarkOrderCancelledCommand
   | MarkOrderConfirmedCommand;
 type TerminalOrderOutcome =
   | MarkOrderInventoryUnavailableOutcome
   | MarkOrderExpiredOutcome
+  | MarkOrderCancelledOutcome
   | MarkOrderConfirmedOutcome;
 type TerminalOrderEvent =
   | OrderInventoryUnavailableEvent
   | OrderExpiredEvent
+  | OrderCancelledEvent
   | OrderConfirmedEvent;
 
 async function markOrderTerminal(
@@ -167,11 +188,7 @@ async function markOrderTerminal(
     correlationId: input.correlationId,
     status,
   };
-  const eventType = status === "EXPIRED"
-    ? "OrderExpired"
-    : status === "CONFIRMED"
-      ? "OrderConfirmed"
-      : "OrderInventoryUnavailable";
+  const eventType = orderEventType(status);
   const event = {
     eventId,
     eventType,
@@ -251,6 +268,15 @@ async function markOrderTerminal(
       throw new Error("Order state invariant violated");
     }
     return recordCompletedOrderOperation(client, orderTableName, operation);
+  }
+}
+
+function orderEventType(status: TerminalOrderOutcome["status"]): TerminalOrderEvent["eventType"] {
+  switch (status) {
+    case "INVENTORY_UNAVAILABLE": return "OrderInventoryUnavailable";
+    case "EXPIRED": return "OrderExpired";
+    case "CANCELLED": return "OrderCancelled";
+    case "CONFIRMED": return "OrderConfirmed";
   }
 }
 

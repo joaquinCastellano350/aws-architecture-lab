@@ -12,7 +12,10 @@ import type { PaymentCommand } from "@aws-architecture-lab/contracts";
 import { DynamoDeterministicPaymentProvider } from "./dynamo-deterministic-payment-provider.js";
 import { DynamoPaymentLedger } from "./dynamo-payment-ledger.js";
 import { PaymentCommandService } from "./payment-command-service.js";
-import { PaymentProviderResponseLostError } from "./payment-provider.js";
+import {
+  PaymentProviderResponseLostError,
+  PaymentProviderTransientError,
+} from "./payment-provider.js";
 
 describe("durable Payment replay", () => {
   it("persists one capture result and fact across fresh adapter instances", async () => {
@@ -74,7 +77,7 @@ describe("durable Payment replay", () => {
     dynamo.put("failure-plans", {
       recordKey: "FAILURE_PLAN#payment:payment-123:capture",
       recordType: "FAILURE_PLAN",
-      effects: ["COMMIT_THEN_LOST_RESPONSE"],
+      effects: ["AMBIGUOUS_COMPLETION"],
       attemptCount: 0,
     });
 
@@ -88,6 +91,31 @@ describe("durable Payment replay", () => {
       recordType === "PROVIDER_OPERATION" &&
       (recordKey as string).includes(":capture")
     )).toHaveLength(1);
+  });
+
+  it("durably consumes fail-before-mutation and duplicate-delivery plans", async () => {
+    const dynamo = new PaymentDynamoHarness();
+    dynamo.put("failure-plans", {
+      recordKey: "FAILURE_PLAN#payment:payment-123:authorize",
+      recordType: "FAILURE_PLAN",
+      effects: ["FAIL_BEFORE_MUTATION", "DUPLICATE_DELIVERY"],
+    });
+    const payment = service(dynamo);
+
+    await expect(payment.execute(authorizeCommand())).rejects.toBeInstanceOf(
+      PaymentProviderTransientError,
+    );
+    await expect(service(dynamo).execute(authorizeCommand())).resolves.toEqual(
+      expect.objectContaining({ status: "AUTHORIZED" }),
+    );
+
+    expect(dynamo.items("fake-provider").filter(({ recordType }) =>
+      recordType === "PROVIDER_OPERATION"
+    )).toHaveLength(1);
+    expect(dynamo.item(
+      "fake-provider",
+      "FAILURE_ATTEMPT#payment:payment-123:authorize",
+    )?.attemptCount).toBe(2);
   });
 });
 

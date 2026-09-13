@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:order:cancelled-event:v1",
+  "title": "OrderCancelledEvent",
+  "type": "object",
+  "required": ["eventId", "eventType", "eventVersion", "occurredAt", "correlationId", "causationId", "aggregateType", "aggregateId", "payload"],
+  "properties": {
+    "eventId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "eventType": { "type": "string", "const": "OrderCancelled" },
+    "eventVersion": { "type": "string", "const": "1.0" },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "causationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "aggregateType": { "type": "string", "const": "Order" },
+    "aggregateId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "payload": {
+      "type": "object",
+      "required": ["status"],
+      "properties": { "status": { "type": "string", "const": "CANCELLED" } },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
