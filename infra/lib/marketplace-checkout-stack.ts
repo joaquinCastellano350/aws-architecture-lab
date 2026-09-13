@@ -415,6 +415,9 @@ export class MarketplaceCheckoutStack extends Stack {
       "FulfillmentCommand",
       "fulfillment-lambda.ts",
       {
+        ...(fakePaymentFailurePlanTable === undefined
+          ? {}
+          : { FULFILLMENT_FAILURE_PLAN_TABLE_NAME: fakePaymentFailurePlanTable.tableName }),
         FULFILLMENT_OUTBOX_TABLE_NAME: fulfillmentOutboxTable.tableName,
         FULFILLMENT_TABLE_NAME: fulfillmentTable.tableName,
       },
@@ -422,6 +425,7 @@ export class MarketplaceCheckoutStack extends Stack {
     );
     fulfillmentTable.grantReadWriteData(fulfillmentFunction);
     fulfillmentOutboxTable.grantWriteData(fulfillmentFunction);
+    fakePaymentFailurePlanTable?.grantReadData(fulfillmentFunction);
     fulfillmentFunction.addToRolePolicy(new PolicyStatement({
       actions: ["dynamodb:TransactWriteItems"],
       resources: [fulfillmentTable.tableArn, fulfillmentOutboxTable.tableArn],
@@ -924,16 +928,21 @@ export class MarketplaceCheckoutStack extends Stack {
         cause: "Payment returned an unsupported capture outcome.",
         error: "PaymentCaptureFailure",
       })));
+    const fulfillmentReservationRejected = new Fail(this, "FulfillmentReservationRejected", {
+      cause: "Fulfillment returned an unsupported reservation outcome.",
+      error: "FulfillmentInvariantViolation",
+    });
     const fulfillmentCapacityOutcome = new Choice(this, "FulfillmentCapacityOutcome")
       .when(
         Condition.stringEquals("$.fulfillmentReservation.status", "RESERVED"),
         capturePayment,
       )
-      .otherwise(cancelPaymentAuthorization);
+      .when(
+        Condition.stringEquals("$.fulfillmentReservation.status", "CAPACITY_UNAVAILABLE"),
+        cancelPaymentAuthorization,
+      )
+      .otherwise(fulfillmentReservationRejected);
     reserveFulfillment.next(fulfillmentCapacityOutcome);
-    reserveFulfillment.addCatch(cancelPaymentAuthorization, {
-      resultPath: "$.fulfillmentReservationError",
-    });
     authorizePayment.next(new Choice(this, "PaymentAuthorizationOutcome")
       .when(
         Condition.stringEquals("$.paymentAuthorization.status", "AUTHORIZED"),
@@ -948,6 +957,11 @@ export class MarketplaceCheckoutStack extends Stack {
         error: "PaymentAuthorizationFailure",
       })));
     authorizePayment.addCatch(releaseCompensatingInventory, {
+      errors: [
+        "PaymentProviderTransientError",
+        "PaymentProviderThrottledError",
+        "PaymentProviderTimeoutError",
+      ],
       resultPath: "$.paymentAuthorizationError",
     });
     reserveInventory.next(new Choice(this, "InventoryReservationOutcome")

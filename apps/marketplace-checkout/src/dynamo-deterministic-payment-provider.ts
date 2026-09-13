@@ -70,7 +70,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
     const replay = await this.#replay(request);
     if (replay !== undefined) return replay;
     const planned = await this.#plannedFailure(request);
-    if (isPlannedOutcome(planned)) return planned;
+    if (isPaymentProviderResult(planned)) return planned;
     const payment: ProviderPayment = {
       recordKey: paymentKey(request.paymentId),
       recordType: "PROVIDER_PAYMENT",
@@ -102,7 +102,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
     const replay = await this.#replay(request);
     if (replay !== undefined) return replay;
     const planned = await this.#plannedFailure(request);
-    if (isPlannedOutcome(planned)) return planned;
+    if (isPaymentProviderResult(planned)) return planned;
     const payment = await this.#payment(request.paymentId);
     if (payment?.status !== "CAPTURED" || request.amountMinor > payment.amountMinor) {
       return this.#recordRejection(request, "PAYMENT_NOT_REFUNDABLE");
@@ -139,7 +139,7 @@ export class DynamoDeterministicPaymentProvider implements PaymentProvider {
     const replay = await this.#replay(request);
     if (replay !== undefined) return replay;
     const planned = await this.#plannedFailure(request);
-    if (isPlannedOutcome(planned)) return planned;
+    if (isPaymentProviderResult(planned)) return planned;
     const payment = await this.#payment(request.paymentId);
     if (payment?.status !== requiredStatus) return this.#recordRejection(request, rejectionCode);
     return this.#transitionApplied(
@@ -367,7 +367,7 @@ function isAmbiguousCompletion(
   return planned === "AMBIGUOUS_COMPLETION" || planned === "COMMIT_THEN_LOST_RESPONSE";
 }
 
-function isPlannedOutcome(
+function isPaymentProviderResult(
   planned: PaymentProviderFailureEffect | PaymentProviderMutationResult | undefined,
 ): planned is PaymentProviderMutationResult {
   return typeof planned === "object";

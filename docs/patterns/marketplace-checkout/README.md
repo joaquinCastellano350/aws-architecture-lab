@@ -82,12 +82,14 @@ completes the abandoned `IN_PROGRESS` operation before any later mutation. Local
 contract tests deterministically model fail-before-mutation, rejection, throttling, timeout,
 duplicate delivery, cancellation, refund, and ambiguous completion, including zero duplicate
 capture under replay.
-The deployed fake consumes the same effects from durable `FAILURE_PLAN#<semantic-key>`
-records in a dedicated failure-plan table. Only the separately assumable
-`FakePaymentFailurePlanRoleArn` can write that key namespace; the Payment Lambda can only
-read plans, and the role has no access to provider state, Payment ledger, or outbox records.
-Production-reference synthesis omits the entire test control plane by setting
-`enableFakePaymentFailurePlans: false`.
+The deployed fakes consume effects from durable `FAILURE_PLAN#<semantic-key>` records in a
+dedicated failure-plan table. Payment supports the full deterministic provider matrix;
+Fulfillment uses a business-rejection plan to return the typed `CAPACITY_UNAVAILABLE`
+outcome without mutating capacity. Only the separately assumable
+`FakePaymentFailurePlanRoleArn` can write that key namespace; domain Lambdas can only read
+plans, and the role has no access to provider state, domain ledgers, or outbox records.
+Production-reference synthesis omits the entire test control plane when
+`WORKLOAD_PROFILE=production-reference`.
 Each immutable workflow revision invokes pinned Order, Inventory, Payment, and Fulfillment handler versions.
 Replaced workflow and handler versions are retained across updates.
 Deleting each unqualified parent resource during ephemeral teardown deletes its associated

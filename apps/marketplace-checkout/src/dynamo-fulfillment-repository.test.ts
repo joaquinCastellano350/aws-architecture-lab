@@ -66,6 +66,45 @@ describe("Fulfillment persistence", () => {
       .rejects.toBe(conflict);
     expect(gets).toBe(2);
   });
+
+  it("records a stable capacity rejection without reserving Fulfillment", async () => {
+    const sent: unknown[] = [];
+    const client = {
+      async send(request: unknown) {
+        sent.push(request);
+        if (request instanceof GetCommand) {
+          return request.input.TableName === "failure-plans"
+            ? { Item: { effects: ["BUSINESS_REJECTION"] } }
+            : {};
+        }
+        if (request instanceof TransactWriteCommand) return {};
+        throw new Error("Unexpected DynamoDB command");
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const fulfillment = new DynamoFulfillmentRepository(
+      "fulfillment",
+      "fulfillment-outbox",
+      { client, failurePlanTableName: "failure-plans" },
+    );
+
+    await expect(fulfillment.execute(command("ReserveFulfillment", "reserve-rejected")))
+      .resolves.toEqual(expect.objectContaining({ status: "CAPACITY_UNAVAILABLE" }));
+    const write = sent.find(
+      (request): request is TransactWriteCommand => request instanceof TransactWriteCommand,
+    );
+    expect(write?.input.TransactItems).toEqual([
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          TableName: "fulfillment",
+          Item: expect.objectContaining({
+            recordType: "OPERATION",
+            state: "FAILED",
+            result: expect.objectContaining({ status: "CAPACITY_UNAVAILABLE" }),
+          }),
+        }),
+      }),
+    ]);
+  });
 });
 
 function repository(client: FulfillmentDynamoHarness) {

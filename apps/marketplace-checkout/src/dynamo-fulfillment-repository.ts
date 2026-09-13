@@ -17,6 +17,7 @@ export class DynamoFulfillmentRepository {
   readonly #client: DynamoDBDocumentClient;
   readonly #clock: () => Date;
   readonly #eventId: () => string;
+  readonly #failurePlanTableName: string | undefined;
 
   public constructor(
     readonly tableName: string,
@@ -28,12 +29,20 @@ export class DynamoFulfillmentRepository {
     });
     this.#clock = dependencies.clock ?? (() => new Date());
     this.#eventId = dependencies.eventId ?? randomUUID;
+    this.#failurePlanTableName = dependencies.failurePlanTableName;
   }
 
   public async execute(command: FulfillmentCommand): Promise<FulfillmentCommandOutcome> {
     const payloadHash = stablePayloadHash(command);
     const recorded = await this.#operation(command.operationId);
     if (recorded !== undefined) return recordedOutcome(recorded, payloadHash);
+
+    if (
+      command.commandType === "ReserveFulfillment" &&
+      await this.#capacityUnavailable(command.reservationId)
+    ) {
+      return this.#recordCapacityUnavailable(command, payloadHash);
+    }
 
     const now = this.#clock().toISOString();
     const status = command.commandType === "ReserveFulfillment" ? "RESERVED" : "HANDED_OFF";
@@ -144,6 +153,62 @@ export class DynamoFulfillmentRepository {
     }));
     return response.Item as FulfillmentOperation | undefined;
   }
+
+  async #capacityUnavailable(reservationId: string): Promise<boolean> {
+    if (this.#failurePlanTableName === undefined) return false;
+    const response = await this.#client.send(new GetCommand({
+      TableName: this.#failurePlanTableName,
+      Key: { recordKey: failurePlanKey(reservationId) },
+      ConsistentRead: true,
+    }));
+    const effects = (response.Item as { readonly effects?: unknown } | undefined)?.effects;
+    if (effects === undefined) return false;
+    if (!Array.isArray(effects) || effects.some((effect) => effect !== "BUSINESS_REJECTION")) {
+      throw new Error("Fulfillment failure plan contains an unsupported effect");
+    }
+    return effects[0] === "BUSINESS_REJECTION";
+  }
+
+  async #recordCapacityUnavailable(
+    command: Extract<FulfillmentCommand, { readonly commandType: "ReserveFulfillment" }>,
+    payloadHash: string,
+  ): Promise<FulfillmentCommandOutcome> {
+    const now = this.#clock().toISOString();
+    const result: FulfillmentCommandOutcome = {
+      schemaVersion: "1.0",
+      operationId: command.operationId,
+      checkoutId: command.checkoutId,
+      reservationId: command.reservationId,
+      status: "CAPACITY_UNAVAILABLE",
+    };
+    const operation: FulfillmentOperation = {
+      recordKey: operationKey(command.operationId),
+      recordType: "OPERATION",
+      operationId: command.operationId,
+      payloadHash,
+      state: "FAILED",
+      result,
+      createdAt: now,
+      updatedAt: now,
+    };
+    try {
+      await this.#client.send(new TransactWriteCommand({
+        TransactItems: [{
+          Put: {
+            TableName: this.tableName,
+            Item: operation,
+            ConditionExpression: "attribute_not_exists(recordKey)",
+          },
+        }],
+      }));
+      return result;
+    } catch (error) {
+      if (!isTransactionCancellation(error)) throw error;
+      const concurrent = await this.#operation(command.operationId);
+      if (concurrent === undefined) throw error;
+      return recordedOutcome(concurrent, payloadHash);
+    }
+  }
 }
 
 interface FulfillmentOperation {
@@ -151,7 +216,7 @@ interface FulfillmentOperation {
   readonly recordType: "OPERATION";
   readonly operationId: string;
   readonly payloadHash: string;
-  readonly state: "SUCCEEDED";
+  readonly state: "SUCCEEDED" | "FAILED";
   readonly result: FulfillmentCommandOutcome;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -161,6 +226,7 @@ export interface FulfillmentRepositoryDependencies {
   readonly client?: DynamoDBDocumentClient;
   readonly clock?: () => Date;
   readonly eventId?: () => string;
+  readonly failurePlanTableName?: string;
 }
 
 function recordedOutcome(
@@ -179,6 +245,10 @@ function operationKey(operationId: string): string {
 
 function reservationKey(reservationId: string): string {
   return `RESERVATION#${reservationId}`;
+}
+
+function failurePlanKey(reservationId: string): string {
+  return `FAILURE_PLAN#fulfillment:${reservationId}:reserve`;
 }
 
 function isTransactionCancellation(error: unknown): boolean {

@@ -13,6 +13,16 @@ describe("marketplace checkout configuration", () => {
     ).toEqual({ lambdaReservedConcurrency: 3 });
   });
 
+  it("selects an executable production-reference profile without failure plans", () => {
+    expect(marketplaceCheckoutConfiguration({ WORKLOAD_PROFILE: "production-reference" }))
+      .toEqual({ enableFakePaymentFailurePlans: false });
+  });
+
+  it("rejects an unknown workload profile", () => {
+    expect(() => marketplaceCheckoutConfiguration({ WORKLOAD_PROFILE: "production" }))
+      .toThrow("WORKLOAD_PROFILE must be sandbox or production-reference.");
+  });
+
   it.each(["", "0", "1.5", "11", "not-a-number"])(
     "rejects unsafe reserved concurrency %j",
     (value) => {

@@ -109,10 +109,11 @@ deterministic fake provider persists separate provider state and uses semantic k
 authorize, capture, cancel, and refund, so repeated requests preserve one economic result.
 Sandbox failure plans are durable records in a dedicated table under the `FAILURE_PLAN#`
 key namespace. They can be changed only through the output
-`FakePaymentFailurePlanRoleArn`; the Payment Lambda has read-only access and consumes them
+`FakePaymentFailurePlanRoleArn`; the Payment and Fulfillment Lambdas have read-only access
+and consume them
   to model fail-before-mutation, business rejection, throttling, timeout, duplicate delivery,
   and ambiguous completion. Production-reference
-synthesis disables this test control plane with `enableFakePaymentFailurePlans: false`.
+synthesis disables this test control plane when `WORKLOAD_PROFILE=production-reference`.
 The workflow enters capture only after a typed Fulfillment capacity reservation. It then
 commits Inventory and sends a versioned handoff command with a Step Functions task token
 in the body of an encrypted SQS message. A dedicated worker role heartbeats, commits the
@@ -126,7 +127,8 @@ Inventory once. Fulfillment reservation failure cancels the authorization and th
 Inventory in reverse order. Stable operation IDs make every compensation idempotent, and the
 Order becomes `CANCELLED` only after all required compensation outcomes are confirmed.
 
-The OpenAPI 4.0 contract exposes `CANCELLED`, `CONFIRMED`, and `EXPIRED` customer outcomes while
+The OpenAPI 3.0 contract is versioned `4.0.0` and exposes `CANCELLED`, `CONFIRMED`, and
+`EXPIRED` customer outcomes while
 continuing to accept the existing v1 submission schema. Reservations carry a five-minute business deadline. The
 workflow releases a reservation that reaches the deadline before commit and exposes the
 Order as `EXPIRED`. A one-minute
@@ -167,3 +169,7 @@ reconciliation, Fulfillment-reservation failure, reverse-order compensation, ter
 status, durable operation-ledger results, emitted outbox facts, and bounded state transitions.
 It writes provider plans only through the narrowly scoped test role and requires
 `CHECKOUT_REQUEST_CEILING` to be at least `8`.
+
+Set `WORKLOAD_PROFILE=production-reference` before `workload:synth` to generate the
+production-reference template without the failure-plan table, role, environment variables,
+or read policies. The default `sandbox` profile retains the test control plane.

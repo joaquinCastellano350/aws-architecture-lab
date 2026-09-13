@@ -21,6 +21,13 @@ describe("Fulfillment command JSON schemas", () => {
       reservationId: "fulfillment-checkout-123",
       status: "HANDED_OFF",
     })).toEqual(expect.objectContaining({ ok: true }));
+    expect(validateFulfillmentCommandOutcome({
+      schemaVersion: "1.0",
+      operationId: "reserve-checkout-123",
+      checkoutId: "checkout-123",
+      reservationId: "fulfillment-checkout-123",
+      status: "CAPACITY_UNAVAILABLE",
+    })).toEqual(expect.objectContaining({ ok: true }));
   });
 
   it("rejects unsupported versions", () => {

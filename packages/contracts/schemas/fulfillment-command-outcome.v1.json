@@ -9,7 +9,7 @@
     "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
     "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
     "reservationId": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "status": { "type": "string", "enum": ["RESERVED", "HANDED_OFF", "RESERVATION_NOT_ACTIVE"] },
+    "status": { "type": "string", "enum": ["RESERVED", "HANDED_OFF", "CAPACITY_UNAVAILABLE", "RESERVATION_NOT_ACTIVE"] },
     "reservationStatus": { "type": "string", "enum": ["RESERVED", "HANDED_OFF"] }
   },
   "additionalProperties": true

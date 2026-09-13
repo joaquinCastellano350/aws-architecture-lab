@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-
 import { isRecord, runAwsJson } from "../lib/aws-cli.js";
 import { executeAsyncCli, runEnvironmentPreflight } from "../lib/cli.js";
 import { dynamoStringAttribute, pollUntil, stackOutput } from "../lib/workload-evidence.js";
@@ -18,7 +14,6 @@ type FailureEffect =
 interface EvidenceContext {
   readonly failurePlanTableName: string;
   readonly failureRoleEnvironment: NodeJS.ProcessEnv;
-  readonly fulfillmentFunctionName: string;
   readonly fulfillmentTableName: string;
   readonly inventoryOutboxTableName: string;
   readonly inventoryTableName: string;
@@ -39,7 +34,6 @@ await executeAsyncCli(async () => {
   const context: EvidenceContext = {
     failurePlanTableName: stackOutput("FakePaymentFailurePlanTableName"),
     failureRoleEnvironment: assumeFailurePlanRole(stackOutput("FakePaymentFailurePlanRoleArn")),
-    fulfillmentFunctionName: stackOutput("FulfillmentCommandFunctionName"),
     fulfillmentTableName: stackOutput("FulfillmentTableName"),
     inventoryOutboxTableName: stackOutput("InventoryOutboxTableName"),
     inventoryTableName: stackOutput("InventoryTableName"),
@@ -172,45 +166,46 @@ async function verifyPaymentPlan(
 
 async function verifyFulfillmentReservationFailure(context: EvidenceContext): Promise<void> {
   const checkoutId = checkoutIdFor(context, "fulfillment-rejection");
-  invokeFulfillment(context.fulfillmentFunctionName, {
-    schemaVersion: "1.0",
-    commandType: "ReserveFulfillment",
-    operationId: `occupied-fulfillment-${checkoutId}`,
-    checkoutId: `occupied-${checkoutId}`,
-    reservationId: `fulfillment-${checkoutId}`,
-    correlationId: `occupied-${checkoutId}`,
-    causationId: `failure-evidence-${context.runId}`,
-  });
-  await waitForFulfillmentReservation(context, checkoutId);
-
-  const executionArn = startWorkflow(context, checkoutId);
-  const history = await waitForExecution(executionArn);
-  await waitForOrderStatus(context, checkoutId, "CANCELLED");
-  assertStateVisits(history, "ReserveFulfillment", 1);
-  assertStateVisits(history, "CancelPaymentAuthorization", 1);
-  assertStateVisits(history, "ReleaseCompensatingInventory", 1);
-  assertStateOrder(history, [
-    "CancelPaymentAuthorization",
-    "ReleaseCompensatingInventory",
-    "MarkOrderCancelled",
-  ]);
-  assertBoundedTransitions(history);
-  assertOperationStatus(
-    context.paymentTableName,
-    "recordKey",
-    `OPERATION#compensate-payment-${checkoutId}`,
-    "CANCELLED",
-  );
-  assertCompensatedInventoryAndOrder(context, checkoutId);
-  assertEvents(context.paymentOutboxTableName, checkoutId, [
-    "PaymentAuthorized",
-    "PaymentCancelled",
-  ]);
-  assertEvents(context.inventoryOutboxTableName, checkoutId, [
-    "InventoryReserved",
-    "InventoryReleased",
-  ]);
-  assertEvents(context.orderOutboxTableName, checkoutId, ["OrderPending", "OrderCancelled"]);
+  const semanticKey = `fulfillment:fulfillment-${checkoutId}:reserve`;
+  putFailurePlan(context, semanticKey, ["BUSINESS_REJECTION"]);
+  try {
+    const executionArn = startWorkflow(context, checkoutId);
+    const history = await waitForExecution(executionArn);
+    await waitForOrderStatus(context, checkoutId, "CANCELLED");
+    assertStateVisits(history, "ReserveFulfillment", 1);
+    assertStateVisits(history, "CancelPaymentAuthorization", 1);
+    assertStateVisits(history, "ReleaseCompensatingInventory", 1);
+    assertStateOrder(history, [
+      "CancelPaymentAuthorization",
+      "ReleaseCompensatingInventory",
+      "MarkOrderCancelled",
+    ]);
+    assertBoundedTransitions(history);
+    assertOperationStatus(
+      context.fulfillmentTableName,
+      "recordKey",
+      `OPERATION#reserve-fulfillment-${checkoutId}`,
+      "CAPACITY_UNAVAILABLE",
+    );
+    assertOperationStatus(
+      context.paymentTableName,
+      "recordKey",
+      `OPERATION#compensate-payment-${checkoutId}`,
+      "CANCELLED",
+    );
+    assertCompensatedInventoryAndOrder(context, checkoutId);
+    assertEvents(context.paymentOutboxTableName, checkoutId, [
+      "PaymentAuthorized",
+      "PaymentCancelled",
+    ]);
+    assertEvents(context.inventoryOutboxTableName, checkoutId, [
+      "InventoryReserved",
+      "InventoryReleased",
+    ]);
+    assertEvents(context.orderOutboxTableName, checkoutId, ["OrderPending", "OrderCancelled"]);
+  } finally {
+    deleteFailurePlan(context, semanticKey);
+  }
 }
 
 function assertCompensatedInventoryAndOrder(
@@ -483,52 +478,6 @@ function assumeFailurePlanRole(roleArn: string): NodeJS.ProcessEnv {
     AWS_SECRET_ACCESS_KEY: credentials.SecretAccessKey,
     AWS_SESSION_TOKEN: credentials.SessionToken,
   };
-}
-
-function invokeFulfillment(functionName: string, payload: unknown): void {
-  const directory = mkdtempSync(path.join(tmpdir(), "aws-architecture-lab-failure-"));
-  const responsePath = path.join(directory, "response.json");
-  try {
-    const metadata = runAwsJson([
-      "lambda",
-      "invoke",
-      "--function-name",
-      functionName,
-      "--cli-binary-format",
-      "raw-in-base64-out",
-      "--payload",
-      JSON.stringify(payload),
-      responsePath,
-    ]);
-    const response = JSON.parse(readFileSync(responsePath, "utf8")) as unknown;
-    if (
-      !isRecord(metadata) ||
-      metadata.StatusCode !== 200 ||
-      metadata.FunctionError !== undefined ||
-      (isRecord(response) && typeof response.errorMessage === "string")
-    ) {
-      throw new Error(`Could not seed the Fulfillment reservation: ${JSON.stringify(metadata)}.`);
-    }
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-async function waitForFulfillmentReservation(
-  context: EvidenceContext,
-  checkoutId: string,
-): Promise<void> {
-  const observed = await pollUntil(20_000, () => {
-    const reservation = dynamoItem(
-      context.fulfillmentTableName,
-      "recordKey",
-      `RESERVATION#fulfillment-${checkoutId}`,
-    );
-    return dynamoStringAttribute(reservation, "status") === "RESERVED" ? true : undefined;
-  });
-  if (observed === undefined) {
-    throw new Error(`Could not seed the occupied Fulfillment reservation for ${checkoutId}.`);
-  }
 }
 
 function checkoutIdFor(context: EvidenceContext, scenario: string): string {

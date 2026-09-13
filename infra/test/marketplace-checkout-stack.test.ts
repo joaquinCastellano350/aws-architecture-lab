@@ -31,6 +31,7 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     expect(definition).toMatch(/CompensatingInventoryReleaseOutcome.*RELEASED.*MarkOrderCancelled/);
     expect(definition).toMatch(/OrderCancellationOutcome.*CANCELLED.*CheckoutCancelled/);
     expect(definition).toContain("PaymentProviderTransientError");
+    expect(definition).toContain("CAPACITY_UNAVAILABLE");
     for (const output of [
       "OrderOutboxTableName",
       "InventoryOutboxTableName",
@@ -53,6 +54,8 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     );
     const fulfillmentWorker = fulfillmentWorkerEntry?.[1];
     expect(fulfillmentCommand).toBeDefined();
+    expect(fulfillmentCommand?.Properties?.Environment?.Variables)
+      .toHaveProperty("FULFILLMENT_FAILURE_PLAN_TABLE_NAME");
     expect(fulfillmentWorker).toBeDefined();
 
     template.hasResourceProperties("AWS::SQS::Queue", {
@@ -167,6 +170,11 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     );
     expect(paymentFunction?.Properties?.Environment?.Variables)
       .not.toHaveProperty("FAKE_PAYMENT_FAILURE_PLAN_TABLE_NAME");
+    const fulfillmentFunction = functions.find((fn) =>
+      fn.Properties?.Environment?.Variables?.FULFILLMENT_TABLE_NAME !== undefined
+    );
+    expect(fulfillmentFunction?.Properties?.Environment?.Variables)
+      .not.toHaveProperty("FULFILLMENT_FAILURE_PLAN_TABLE_NAME");
   }, 30_000);
 
   it("protects both checkout API operations with IAM authorization", () => {
