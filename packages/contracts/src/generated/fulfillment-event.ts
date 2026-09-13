@@ -13,6 +13,19 @@ export interface FulfillmentReservedEvent {
   readonly [key: string]: unknown;
 }
 
+export interface FulfillmentCancelledEvent {
+  readonly eventId: string;
+  readonly eventType: "FulfillmentCancelled";
+  readonly eventVersion: "1.0";
+  readonly occurredAt: string;
+  readonly correlationId: string;
+  readonly causationId: string;
+  readonly aggregateType: "Fulfillment";
+  readonly aggregateId: string;
+  readonly payload: { readonly checkoutId: string; readonly reservationId: string; readonly status: "CANCELLED"; readonly [key: string]: unknown };
+  readonly [key: string]: unknown;
+}
+
 export interface FulfillmentHandedOffEvent {
   readonly eventId: string;
   readonly eventType: "FulfillmentHandedOff";
@@ -49,6 +62,27 @@ export function validateFulfillmentReservedEvent(
     return { ok: false, error: "Value does not match FulfillmentReservedEvent" };
   }
   return { ok: true, value: input as FulfillmentReservedEvent };
+}
+
+export function validateFulfillmentCancelledEvent(
+  input: unknown,
+): FulfillmentEventValidationResult<FulfillmentCancelledEvent> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["eventId"] !== "string" || String((input as Record<string, unknown>)["eventId"]).length < 1 || String((input as Record<string, unknown>)["eventId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["eventType"] !== "string" || (input as Record<string, unknown>)["eventType"] !== "FulfillmentCancelled") ||
+    (typeof (input as Record<string, unknown>)["eventVersion"] !== "string" || (input as Record<string, unknown>)["eventVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["occurredAt"] !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test((input as Record<string, unknown>)["occurredAt"] as string) || Number.isNaN(Date.parse((input as Record<string, unknown>)["occurredAt"] as string))) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["aggregateType"] !== "string" || (input as Record<string, unknown>)["aggregateType"] !== "Fulfillment") ||
+    (typeof (input as Record<string, unknown>)["aggregateId"] !== "string" || String((input as Record<string, unknown>)["aggregateId"]).length < 1 || String((input as Record<string, unknown>)["aggregateId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["payload"] !== "object" || (input as Record<string, unknown>)["payload"] === null || Array.isArray((input as Record<string, unknown>)["payload"]) || (typeof ((input as Record<string, unknown>)["payload"] as Record<string, unknown>)["checkoutId"] !== "string" || String(((input as Record<string, unknown>)["payload"] as Record<string, unknown>)["checkoutId"]).length < 1 || String(((input as Record<string, unknown>)["payload"] as Record<string, unknown>)["checkoutId"]).length > 128) || (typeof ((input as Record<string, unknown>)["payload"] as Record<string, unknown>)["reservationId"] !== "string" || String(((input as Record<string, unknown>)["payload"] as Record<string, unknown>)["reservationId"]).length < 1 || String(((input as Record<string, unknown>)["payload"] as Record<string, unknown>)["reservationId"]).length > 256) || (typeof ((input as Record<string, unknown>)["payload"] as Record<string, unknown>)["status"] !== "string" || ((input as Record<string, unknown>)["payload"] as Record<string, unknown>)["status"] !== "CANCELLED"))
+  ) {
+    return { ok: false, error: "Value does not match FulfillmentCancelledEvent" };
+  }
+  return { ok: true, value: input as FulfillmentCancelledEvent };
 }
 
 export function validateFulfillmentHandedOffEvent(

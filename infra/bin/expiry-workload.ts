@@ -50,7 +50,7 @@ async function verifyWorkflowDeadline(workflowAliasArn: string, runId: string): 
     ...workflowInput(checkoutId, reservationExpiresAt),
     inventoryCommitAt: reservationExpiresAt,
   });
-  await waitForOrderStatus(checkoutId, "EXPIRED", 30_000);
+  await waitForOrderStatus(checkoutId, "CANCELLED", 30_000);
 }
 
 interface AbandonedReservationInputs {

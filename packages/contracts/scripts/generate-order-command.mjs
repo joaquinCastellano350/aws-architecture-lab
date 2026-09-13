@@ -11,6 +11,8 @@ const definitions = await Promise.all([
   load("mark-order-expired-outcome.v1.json", "validateMarkOrderExpiredOutcome"),
   load("mark-order-confirmed-command.v1.json", "validateMarkOrderConfirmedCommand"),
   load("mark-order-confirmed-outcome.v1.json", "validateMarkOrderConfirmedOutcome"),
+  load("mark-order-compensating-command.v1.json", "validateMarkOrderCompensatingCommand"),
+  load("mark-order-compensating-outcome.v1.json", "validateMarkOrderCompensatingOutcome"),
   load("mark-order-cancelled-command.v1.json", "validateMarkOrderCancelledCommand"),
   load("mark-order-cancelled-outcome.v1.json", "validateMarkOrderCancelledOutcome"),
 ]);

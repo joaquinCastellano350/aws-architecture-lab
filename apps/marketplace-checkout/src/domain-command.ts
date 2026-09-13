@@ -7,7 +7,13 @@ export function commandTypeOf(event: unknown): unknown {
 }
 
 export function stablePayloadHash(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(stableValue(value))).digest("hex");
+  // A workflow replay has a new delivery cause but must retain the same semantic operation.
+  const payload = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? Object.fromEntries(
+        Object.entries(value).filter(([key]) => key !== "causationId"),
+      )
+    : value;
+  return createHash("sha256").update(JSON.stringify(stableValue(payload))).digest("hex");
 }
 
 function stableValue(value: unknown): unknown {

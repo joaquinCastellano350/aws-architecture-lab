@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   createPendingOrder,
   markOrderCancelled,
+  markOrderCompensating,
   markOrderConfirmed,
   markOrderExpired,
   markOrderInventoryUnavailable,
@@ -116,7 +117,7 @@ describe("Order persistence", () => {
         Update: expect.objectContaining({
           TableName: "orders",
           Key: { checkoutId: "checkout-123" },
-          ConditionExpression: "#status = :pending AND correlationId = :correlationId",
+          ConditionExpression: "#status = :requiredStatus AND correlationId = :correlationId",
         }),
       },
       {
@@ -180,7 +181,7 @@ describe("Order persistence", () => {
         Update: expect.objectContaining({
           TableName: "orders",
           Key: { checkoutId: "checkout-123" },
-          ConditionExpression: "#status = :pending AND correlationId = :correlationId",
+          ConditionExpression: "#status = :requiredStatus AND correlationId = :correlationId",
         }),
       },
       {
@@ -236,7 +237,11 @@ describe("Order persistence", () => {
     expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([
       expect.objectContaining({
         Update: expect.objectContaining({
-          ConditionExpression: "#status = :pending AND correlationId = :correlationId",
+          ConditionExpression: "#status = :requiredStatus AND correlationId = :correlationId",
+          ExpressionAttributeValues: expect.objectContaining({
+            ":requiredStatus": "PENDING",
+            ":targetStatus": "CONFIRMED",
+          }),
         }),
       }),
       expect.objectContaining({
@@ -282,7 +287,11 @@ describe("Order persistence", () => {
     expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([
       expect.objectContaining({
         Update: expect.objectContaining({
-          ConditionExpression: "#status = :pending AND correlationId = :correlationId",
+          ConditionExpression: "#status = :requiredStatus AND correlationId = :correlationId",
+          ExpressionAttributeValues: expect.objectContaining({
+            ":requiredStatus": "COMPENSATING",
+            ":targetStatus": "CANCELLED",
+          }),
         }),
       }),
       expect.objectContaining({
@@ -292,6 +301,56 @@ describe("Order persistence", () => {
             eventId: "event-cancelled",
             eventType: "OrderCancelled",
             payload: { status: "CANCELLED" },
+          }),
+        }),
+      }),
+    ]));
+  });
+
+  it("makes compensation progress customer-visible before terminal cancellation", async () => {
+    const sent: unknown[] = [];
+    const client = {
+      async send(command: unknown) {
+        sent.push(command);
+        if (command instanceof GetCommand) return {};
+        return {};
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    const order = await markOrderCompensating("orders", "order-outbox", {
+      schemaVersion: "1.0",
+      commandType: "MarkOrderCompensating",
+      operationId: "compensate-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    }, {
+      client,
+      clock: () => new Date("2026-09-12T11:59:00.000Z"),
+      eventId: () => "event-compensating",
+    });
+
+    expect(order.status).toBe("COMPENSATING");
+    const transaction = sent.find(
+      (command): command is TransactWriteCommand => command instanceof TransactWriteCommand,
+    );
+    expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Update: expect.objectContaining({
+          ConditionExpression: "#status = :requiredStatus AND correlationId = :correlationId",
+          ExpressionAttributeValues: expect.objectContaining({
+            ":requiredStatus": "PENDING",
+            ":targetStatus": "COMPENSATING",
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          TableName: "order-outbox",
+          Item: expect.objectContaining({
+            eventId: "event-compensating",
+            eventType: "OrderCompensating",
+            payload: { status: "COMPENSATING" },
           }),
         }),
       }),

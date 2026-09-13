@@ -4,6 +4,7 @@ import { interfaceLines, objectValidatorLines } from "./schema-codegen.mjs";
 
 const definitions = await Promise.all([
   load("fulfillment-reserved-event.v1.json", "validateFulfillmentReservedEvent"),
+  load("fulfillment-cancelled-event.v1.json", "validateFulfillmentCancelledEvent"),
   load("fulfillment-handed-off-event.v1.json", "validateFulfillmentHandedOffEvent"),
 ]);
 const lines = [

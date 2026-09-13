@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   validateOrderInventoryUnavailableEvent,
   validateOrderCancelledEvent,
+  validateOrderCompensatingEvent,
   validateOrderExpiredEvent,
   validateOrderPendingEvent,
 } from "./generated/order-event.js";
@@ -74,6 +75,20 @@ describe("Order event JSON schema", () => {
       aggregateType: "Order",
       aggregateId: "checkout-123",
       payload: { status: "CANCELLED" },
+    }).ok).toBe(true);
+  });
+
+  it("accepts a customer-visible compensation-in-progress fact", () => {
+    expect(validateOrderCompensatingEvent({
+      eventId: "event-compensating",
+      eventType: "OrderCompensating",
+      eventVersion: "1.0",
+      occurredAt: "2026-09-12T11:59:00.000Z",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+      aggregateType: "Order",
+      aggregateId: "checkout-123",
+      payload: { status: "COMPENSATING" },
     }).ok).toBe(true);
   });
 

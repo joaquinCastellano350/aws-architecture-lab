@@ -14,6 +14,7 @@ type FailureEffect =
 interface EvidenceContext {
   readonly failurePlanTableName: string;
   readonly failureRoleEnvironment: NodeJS.ProcessEnv;
+  readonly fulfillmentOutboxTableName: string;
   readonly fulfillmentTableName: string;
   readonly inventoryOutboxTableName: string;
   readonly inventoryTableName: string;
@@ -28,12 +29,13 @@ interface EvidenceContext {
 
 await executeAsyncCli(async () => {
   const preflight = runEnvironmentPreflight();
-  if (preflight.requestCeiling < 8) {
-    throw new Error("CHECKOUT_REQUEST_CEILING must be at least 8 for the failure evidence suite.");
+  if (preflight.requestCeiling < 12) {
+    throw new Error("CHECKOUT_REQUEST_CEILING must be at least 12 for the failure evidence suite.");
   }
   const context: EvidenceContext = {
     failurePlanTableName: stackOutput("FakePaymentFailurePlanTableName"),
     failureRoleEnvironment: assumeFailurePlanRole(stackOutput("FakePaymentFailurePlanRoleArn")),
+    fulfillmentOutboxTableName: stackOutput("FulfillmentOutboxTableName"),
     fulfillmentTableName: stackOutput("FulfillmentTableName"),
     inventoryOutboxTableName: stackOutput("InventoryOutboxTableName"),
     inventoryTableName: stackOutput("InventoryTableName"),
@@ -54,9 +56,13 @@ await executeAsyncCli(async () => {
   await verifyPaymentPlan(context, "AMBIGUOUS_COMPLETION", "CONFIRMED", 1);
   await verifyPaymentPlan(context, "DUPLICATE_DELIVERY", "CONFIRMED", 1);
   await verifyFulfillmentReservationFailure(context);
+  await verifyCaptureFailure(context);
+  await verifyAmbiguousCapture(context);
+  await verifyInventoryCommitFailure(context);
+  await verifyRefundRetryExhaustion(context);
 
   console.log(
-    "Failure checks passed: Inventory rejection, Payment rejection/transient/timeout/throttling/ambiguous/duplicate plans, reverse-order compensation, durable ledgers and facts, and bounded workflow transitions.",
+    "Failure checks passed: pre-capture and post-capture branches, capture reconciliation, reverse-order compensation, replay without duplicate economic effects, durable ledgers and facts, and bounded workflow transitions.",
   );
 });
 
@@ -111,7 +117,11 @@ async function verifyPaymentPlan(
     );
 
     if (terminalStatus === "CANCELLED") {
-      assertStateOrder(history, ["ReleaseCompensatingInventory", "MarkOrderCancelled"]);
+      assertStateOrder(history, [
+        "MarkOrderCompensating",
+        "ReleaseCompensatingInventory",
+        "MarkOrderCancelled",
+      ]);
       assertStateVisits(history, "ReleaseCompensatingInventory", 1);
       assertStateVisits(history, "CancelPaymentAuthorization", 0);
       assertCompensatedInventoryAndOrder(context, checkoutId);
@@ -119,7 +129,11 @@ async function verifyPaymentPlan(
         "InventoryReserved",
         "InventoryReleased",
       ]);
-      assertEvents(context.orderOutboxTableName, checkoutId, ["OrderPending", "OrderCancelled"]);
+      assertEvents(context.orderOutboxTableName, checkoutId, [
+        "OrderPending",
+        "OrderCompensating",
+        "OrderCancelled",
+      ]);
       const expectedPaymentOperationState = effect === "BUSINESS_REJECTION"
         ? "FAILED"
         : "IN_PROGRESS";
@@ -176,6 +190,7 @@ async function verifyFulfillmentReservationFailure(context: EvidenceContext): Pr
     assertStateVisits(history, "CancelPaymentAuthorization", 1);
     assertStateVisits(history, "ReleaseCompensatingInventory", 1);
     assertStateOrder(history, [
+      "MarkOrderCompensating",
       "CancelPaymentAuthorization",
       "ReleaseCompensatingInventory",
       "MarkOrderCancelled",
@@ -202,16 +217,260 @@ async function verifyFulfillmentReservationFailure(context: EvidenceContext): Pr
       "InventoryReserved",
       "InventoryReleased",
     ]);
-    assertEvents(context.orderOutboxTableName, checkoutId, ["OrderPending", "OrderCancelled"]);
+    assertEvents(context.orderOutboxTableName, checkoutId, [
+      "OrderPending",
+      "OrderCompensating",
+      "OrderCancelled",
+    ]);
   } finally {
     deleteFailurePlan(context, semanticKey);
   }
+}
+
+async function verifyCaptureFailure(context: EvidenceContext): Promise<void> {
+  const checkoutId = checkoutIdFor(context, "capture-not-applied");
+  const semanticKey = `payment:payment-${checkoutId}:capture`;
+  const timing = { reservationExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString() };
+  putFailurePlan(context, semanticKey, [
+    "FAIL_BEFORE_MUTATION",
+    "FAIL_BEFORE_MUTATION",
+    "FAIL_BEFORE_MUTATION",
+  ]);
+  try {
+    const executionArn = startWorkflow(context, checkoutId, 1, timing);
+    const history = await waitForExecution(executionArn);
+    await waitForOrderStatus(context, checkoutId, "CANCELLED");
+    assertStateOrder(history, [
+      "CapturePayment",
+      "RetrievePaymentAfterCaptureFailure",
+      "MarkOrderCompensating",
+      "CancelFulfillmentReservation",
+      "CancelPaymentAuthorization",
+      "ReleaseCompensatingInventory",
+      "MarkOrderCancelled",
+    ]);
+    assertStateVisits(history, "RefundCapturedPayment", 0);
+    assertNumberAttribute(
+      dynamoItem(context.providerTableName, "recordKey", `FAILURE_ATTEMPT#${semanticKey}`),
+      "attemptCount",
+      3,
+    );
+    assertOperationStatus(
+      context.paymentTableName,
+      "recordKey",
+      `OPERATION#capture-${checkoutId}`,
+      "REJECTED",
+    );
+    assertOperationStatus(
+      context.fulfillmentTableName,
+      "recordKey",
+      `OPERATION#cancel-fulfillment-${checkoutId}`,
+      "CANCELLED",
+    );
+    assertOperationStatus(
+      context.paymentTableName,
+      "recordKey",
+      `OPERATION#compensate-payment-${checkoutId}`,
+      "CANCELLED",
+    );
+    assertCompensatedInventoryAndOrder(context, checkoutId);
+    assertCompensationFacts(context, checkoutId, ["PaymentAuthorized", "PaymentCancelled"]);
+
+    await replayWorkflow(context, checkoutId, timing);
+    assertNumberAttribute(
+      dynamoItem(context.providerTableName, "recordKey", `FAILURE_ATTEMPT#${semanticKey}`),
+      "attemptCount",
+      3,
+    );
+    assertCompensationFacts(context, checkoutId, ["PaymentAuthorized", "PaymentCancelled"]);
+  } finally {
+    deleteFailurePlan(context, semanticKey);
+  }
+}
+
+async function verifyAmbiguousCapture(context: EvidenceContext): Promise<void> {
+  const checkoutId = checkoutIdFor(context, "capture-ambiguous");
+  const semanticKey = `payment:payment-${checkoutId}:capture`;
+  const timing = { reservationExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString() };
+  putFailurePlan(context, semanticKey, ["AMBIGUOUS_COMPLETION"]);
+  try {
+    const executionArn = startWorkflow(context, checkoutId, 1, timing);
+    const history = await waitForExecution(executionArn);
+    await waitForOrderStatus(context, checkoutId, "CANCELLED");
+    assertStateVisits(history, "CapturePayment", 1);
+    assertStateVisits(history, "RetrievePaymentAfterCaptureFailure", 1);
+    assertStateVisits(history, "RefundCapturedPayment", 1);
+    assertNumberAttribute(
+      dynamoItem(context.providerTableName, "recordKey", `FAILURE_ATTEMPT#${semanticKey}`),
+      "attemptCount",
+      1,
+    );
+    assertOperationStatus(
+      context.paymentTableName,
+      "recordKey",
+      `OPERATION#capture-${checkoutId}`,
+      "CAPTURED",
+    );
+    assertOperationStatus(
+      context.paymentTableName,
+      "recordKey",
+      `OPERATION#refund-payment-${checkoutId}`,
+      "REFUNDED",
+    );
+    assertCompensationFacts(context, checkoutId, [
+      "PaymentAuthorized",
+      "PaymentCaptured",
+      "PaymentRefunded",
+    ]);
+    assertBoundedTransitions(history);
+
+    await replayWorkflow(context, checkoutId, timing);
+    assertCompensationFacts(context, checkoutId, [
+      "PaymentAuthorized",
+      "PaymentCaptured",
+      "PaymentRefunded",
+    ]);
+  } finally {
+    deleteFailurePlan(context, semanticKey);
+  }
+}
+
+async function verifyInventoryCommitFailure(context: EvidenceContext): Promise<void> {
+  const checkoutId = checkoutIdFor(context, "inventory-commit");
+  const now = Date.now();
+  const timing = {
+    reservationExpiresAt: new Date(now + 15_000).toISOString(),
+    inventoryCommitAt: new Date(now + 16_000).toISOString(),
+  };
+  const executionArn = startWorkflow(context, checkoutId, 1, timing);
+  const history = await waitForExecution(executionArn);
+  await waitForOrderStatus(context, checkoutId, "CANCELLED");
+  assertStateOrder(history, [
+    "CapturePayment",
+    "CommitInventory",
+    "MarkOrderCompensating",
+    "RefundCapturedPayment",
+    "CancelFulfillmentReservation",
+    "ReleaseCompensatingInventory",
+    "MarkOrderCancelled",
+  ]);
+  assertStateVisits(history, "CancelPaymentAuthorization", 0);
+  assertOperationStatus(
+    context.inventoryTableName,
+    "recordKey",
+    `OPERATION#commit-${checkoutId}`,
+    "RESERVATION_NOT_ACTIVE",
+  );
+  assertOperationStatus(
+    context.paymentTableName,
+    "recordKey",
+    `OPERATION#refund-payment-${checkoutId}`,
+    "REFUNDED",
+  );
+  assertOperationStatus(
+    context.fulfillmentTableName,
+    "recordKey",
+    `OPERATION#cancel-fulfillment-${checkoutId}`,
+    "CANCELLED",
+  );
+  assertCompensatedInventoryAndOrder(context, checkoutId);
+  assertCompensationFacts(context, checkoutId, [
+    "PaymentAuthorized",
+    "PaymentCaptured",
+    "PaymentRefunded",
+  ]);
+  assertBoundedTransitions(history);
+
+  await replayWorkflow(context, checkoutId, timing);
+  assertCompensationFacts(context, checkoutId, [
+    "PaymentAuthorized",
+    "PaymentCaptured",
+    "PaymentRefunded",
+  ]);
+}
+
+async function verifyRefundRetryExhaustion(context: EvidenceContext): Promise<void> {
+  const checkoutId = checkoutIdFor(context, "refund-exhaustion");
+  const semanticKey = `payment:payment-${checkoutId}:refund`;
+  const now = Date.now();
+  const timing = {
+    reservationExpiresAt: new Date(now + 15_000).toISOString(),
+    inventoryCommitAt: new Date(now + 16_000).toISOString(),
+  };
+  putFailurePlan(context, semanticKey, [
+    "FAIL_BEFORE_MUTATION",
+    "FAIL_BEFORE_MUTATION",
+    "FAIL_BEFORE_MUTATION",
+  ]);
+  try {
+    const executionArn = startWorkflow(context, checkoutId, 1, timing);
+    const failedHistory = await waitForExecution(executionArn, "FAILED");
+    await waitForOrderStatus(context, checkoutId, "COMPENSATING");
+    assertStateVisits(failedHistory, "RefundCapturedPayment", 1);
+    assertNumberAttribute(
+      dynamoItem(context.providerTableName, "recordKey", `FAILURE_ATTEMPT#${semanticKey}`),
+      "attemptCount",
+      3,
+    );
+    assertStringAttribute(
+      dynamoItem(context.paymentTableName, "recordKey", `OPERATION#refund-payment-${checkoutId}`),
+      "state",
+      "IN_PROGRESS",
+    );
+    assertEvents(context.paymentOutboxTableName, checkoutId, [
+      "PaymentAuthorized",
+      "PaymentCaptured",
+    ]);
+
+    deleteFailurePlan(context, semanticKey);
+    await replayWorkflow(context, checkoutId, timing);
+    assertOperationStatus(
+      context.paymentTableName,
+      "recordKey",
+      `OPERATION#refund-payment-${checkoutId}`,
+      "REFUNDED",
+    );
+    assertCompensationFacts(context, checkoutId, [
+      "PaymentAuthorized",
+      "PaymentCaptured",
+      "PaymentRefunded",
+    ]);
+  } finally {
+    deleteFailurePlan(context, semanticKey);
+  }
+}
+
+function assertCompensationFacts(
+  context: EvidenceContext,
+  checkoutId: string,
+  paymentEvents: readonly string[],
+): void {
+  assertEvents(context.paymentOutboxTableName, checkoutId, paymentEvents);
+  assertEvents(context.fulfillmentOutboxTableName, checkoutId, [
+    "FulfillmentReserved",
+    "FulfillmentCancelled",
+  ]);
+  assertEvents(context.inventoryOutboxTableName, checkoutId, [
+    "InventoryReserved",
+    "InventoryReleased",
+  ]);
+  assertEvents(context.orderOutboxTableName, checkoutId, [
+    "OrderPending",
+    "OrderCompensating",
+    "OrderCancelled",
+  ]);
 }
 
 function assertCompensatedInventoryAndOrder(
   context: EvidenceContext,
   checkoutId: string,
 ): void {
+  assertOperationStatus(
+    context.orderTableName,
+    "checkoutId",
+    `OPERATION#compensate-order-${checkoutId}`,
+    "COMPENSATING",
+  );
   assertOperationStatus(
     context.inventoryTableName,
     "recordKey",
@@ -230,6 +489,11 @@ function startWorkflow(
   context: EvidenceContext,
   checkoutId: string,
   quantity = 1,
+  options: {
+    readonly executionName?: string;
+    readonly inventoryCommitAt?: string;
+    readonly reservationExpiresAt?: string;
+  } = {},
 ): string {
   const response = runAwsJson([
     "stepfunctions",
@@ -237,7 +501,7 @@ function startWorkflow(
     "--state-machine-arn",
     context.workflowAliasArn,
     "--name",
-    checkoutId,
+    options.executionName ?? checkoutId,
     "--input",
     JSON.stringify({
       checkoutId,
@@ -245,7 +509,11 @@ function startWorkflow(
       correlationId: `corr-${checkoutId}`,
       itemId: `item-${checkoutId}`,
       quantity,
-      reservationExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+      reservationExpiresAt:
+        options.reservationExpiresAt ?? new Date(Date.now() + 5 * 60_000).toISOString(),
+      ...(options.inventoryCommitAt === undefined
+        ? {}
+        : { inventoryCommitAt: options.inventoryCommitAt }),
     }),
   ]);
   if (!isRecord(response) || typeof response.executionArn !== "string") {
@@ -254,7 +522,23 @@ function startWorkflow(
   return response.executionArn;
 }
 
-async function waitForExecution(executionArn: string): Promise<readonly Record<string, unknown>[]> {
+async function replayWorkflow(
+  context: EvidenceContext,
+  checkoutId: string,
+  timing: { readonly inventoryCommitAt?: string; readonly reservationExpiresAt: string },
+): Promise<void> {
+  const executionArn = startWorkflow(context, checkoutId, 1, {
+    ...timing,
+    executionName: `${checkoutId}-replay`,
+  });
+  const history = await waitForExecution(executionArn);
+  assertBoundedTransitions(history);
+}
+
+async function waitForExecution(
+  executionArn: string,
+  expectedStatus = "SUCCEEDED",
+): Promise<readonly Record<string, unknown>[]> {
   const status = await pollUntil(45_000, () => {
     const response = runAwsJson([
       "stepfunctions",
@@ -265,8 +549,10 @@ async function waitForExecution(executionArn: string): Promise<readonly Record<s
     if (!isRecord(response) || typeof response.status !== "string") return undefined;
     return response.status === "RUNNING" ? undefined : response.status;
   });
-  if (status !== "SUCCEEDED") {
-    throw new Error(`Failure evidence execution ended with ${status ?? "no terminal status"}.`);
+  if (status !== expectedStatus) {
+    throw new Error(
+      `Failure evidence execution ended with ${status ?? "no terminal status"}; expected ${expectedStatus}.`,
+    );
   }
   const response = runAwsJson([
     "stepfunctions",

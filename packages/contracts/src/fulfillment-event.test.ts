@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  validateFulfillmentCancelledEvent,
   validateFulfillmentHandedOffEvent,
   validateFulfillmentReservedEvent,
 } from "./generated/fulfillment-event.js";
@@ -8,6 +9,7 @@ import {
 describe("Fulfillment event JSON schemas", () => {
   it.each([
     ["FulfillmentReserved", "RESERVED", validateFulfillmentReservedEvent],
+    ["FulfillmentCancelled", "CANCELLED", validateFulfillmentCancelledEvent],
     ["FulfillmentHandedOff", "HANDED_OFF", validateFulfillmentHandedOffEvent],
   ] as const)("accepts the versioned %s committed fact", (eventType, status, validate) => {
     expect(validate({

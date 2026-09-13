@@ -14,6 +14,33 @@ import type {
 } from "./payment-provider.js";
 
 type PaymentMutationCommand = Exclude<PaymentCommand, { readonly commandType: "RetrievePayment" }>;
+type PaymentMutationCommandType = PaymentMutationCommand["commandType"];
+
+const PAYMENT_MUTATION_METADATA: Record<PaymentMutationCommandType, {
+  readonly expectedStatus: PaymentProviderStatus;
+  readonly prerequisiteStatus?: PaymentProviderStatus;
+  readonly notAppliedCode: string;
+}> = {
+  AuthorizePayment: {
+    expectedStatus: "AUTHORIZED",
+    notAppliedCode: "AUTHORIZATION_NOT_APPLIED",
+  },
+  CapturePayment: {
+    expectedStatus: "CAPTURED",
+    prerequisiteStatus: "AUTHORIZED",
+    notAppliedCode: "CAPTURE_NOT_APPLIED",
+  },
+  CancelPayment: {
+    expectedStatus: "CANCELLED",
+    prerequisiteStatus: "AUTHORIZED",
+    notAppliedCode: "CANCELLATION_NOT_APPLIED",
+  },
+  RefundPayment: {
+    expectedStatus: "REFUNDED",
+    prerequisiteStatus: "CAPTURED",
+    notAppliedCode: "REFUND_NOT_APPLIED",
+  },
+};
 
 export interface PaymentOperationRecord {
   readonly recordKey: string;
@@ -212,18 +239,45 @@ export class PaymentCommandService {
   async #retrieve(
     command: Extract<PaymentCommand, { readonly commandType: "RetrievePayment" }>,
   ): Promise<PaymentCommandOutcome> {
+    const retrieved = await this.#provider.retrieve({ paymentId: command.paymentId });
     const active = await this.#ledger.findActiveOperation(command.paymentId);
     if (active !== undefined) {
-      const reconciled = await this.#reconcile(active);
-      if (reconciled?.status === "RECONCILIATION_REQUIRED") {
+      const expected = expectedStatus(active.commandType);
+      if (retrieved.kind === "FOUND" && retrieved.status === expected) {
+        await this.#recordProviderResult(active, {
+          kind: "APPLIED",
+          providerReference: retrieved.providerReference,
+          status: retrieved.status,
+        });
+      } else if (
+        (retrieved.kind === "NOT_FOUND" && active.commandType === "AuthorizePayment") ||
+        (retrieved.kind === "FOUND" &&
+          retrieved.status === prerequisiteStatus(active.commandType))
+      ) {
+        await this.#ledger.complete({
+          operationId: active.operationId,
+          payloadHash: active.payloadHash,
+          state: "FAILED",
+          result: outcome(
+            active,
+            "REJECTED",
+            undefined,
+            notAppliedCode(active.commandType),
+          ),
+          updatedAt: this.#clock().toISOString(),
+        });
+      } else {
         return outcome(command, "RECONCILIATION_REQUIRED");
       }
     }
-    const retrieved = await this.#provider.retrieve({ paymentId: command.paymentId });
     return retrieved.kind === "NOT_FOUND"
       ? outcome(command, "NOT_FOUND")
       : outcome(command, retrieved.status, retrieved.providerReference);
   }
+}
+
+function notAppliedCode(commandType: PaymentMutationCommandType): string {
+  return PAYMENT_MUTATION_METADATA[commandType].notAppliedCode;
 }
 
 function semanticOperationKey(command: PaymentMutationCommand): string {
@@ -231,24 +285,14 @@ function semanticOperationKey(command: PaymentMutationCommand): string {
   return `payment:${command.paymentId}:${operation}`;
 }
 
-function expectedStatus(commandType: PaymentMutationCommand["commandType"]): PaymentProviderStatus {
-  switch (commandType) {
-    case "AuthorizePayment": return "AUTHORIZED";
-    case "CapturePayment": return "CAPTURED";
-    case "CancelPayment": return "CANCELLED";
-    case "RefundPayment": return "REFUNDED";
-  }
+function expectedStatus(commandType: PaymentMutationCommandType): PaymentProviderStatus {
+  return PAYMENT_MUTATION_METADATA[commandType].expectedStatus;
 }
 
 function prerequisiteStatus(
-  commandType: PaymentMutationCommand["commandType"],
+  commandType: PaymentMutationCommandType,
 ): PaymentProviderStatus | undefined {
-  switch (commandType) {
-    case "AuthorizePayment": return undefined;
-    case "CapturePayment":
-    case "CancelPayment": return "AUTHORIZED";
-    case "RefundPayment": return "CAPTURED";
-  }
+  return PAYMENT_MUTATION_METADATA[commandType].prerequisiteStatus;
 }
 
 function outcome(

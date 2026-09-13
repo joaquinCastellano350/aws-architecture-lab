@@ -10,6 +10,67 @@ import {
 const template = workloadTemplate();
 
 describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
+  it("reconciles capture uncertainty before selecting cancellation or refund", () => {
+    const definition = JSON.stringify(
+      Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
+    );
+
+    expect(definition).toContain("RetrievePaymentAfterCaptureFailure");
+    expect(definition).toContain("PaymentCaptureReconciliationOutcome");
+    expect(definition).toContain("reconcile-capture-{}");
+    expect(definition).toMatch(
+      /CapturePayment.*PaymentProviderResponseLostError.*RetrievePaymentAfterCaptureFailure/,
+    );
+    expect(definition).not.toMatch(
+      /CapturePayment.*?ErrorEquals.*?States\.ALL.*?RetrievePaymentAfterCaptureFailure/,
+    );
+    const captureStart = definition.indexOf("CapturePayment");
+    const captureNext = definition.indexOf("PaymentCaptureOutcome", captureStart);
+    const captureEnd = definition.indexOf("PaymentCaptureOutcome", captureNext + 1);
+    const captureState = definition.slice(captureStart, captureEnd);
+    expect(captureState.indexOf("PaymentProviderResponseLostError"))
+      .toBeGreaterThan(captureState.indexOf("Catch"));
+    expect(definition).toMatch(
+      /PaymentCaptureReconciliationOutcome.*CAPTURED.*RefundCapturedPayment/,
+    );
+    expect(definition).toMatch(
+      /PaymentCaptureReconciliationOutcome.*AUTHORIZED.*CancelPaymentAuthorization/,
+    );
+  });
+
+  it("compensates post-capture failure in reverse order with stable operations", () => {
+    const definition = JSON.stringify(
+      Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
+    );
+
+    for (const state of [
+      "MarkOrderCompensating",
+      "RefundCapturedPayment",
+      "CancelFulfillmentReservation",
+      "ReleaseCompensatingInventory",
+      "MarkOrderCancelled",
+    ]) {
+      expect(definition).toContain(state);
+    }
+    for (const operationId of [
+      "compensate-order-{}",
+      "refund-payment-{}",
+      "cancel-fulfillment-{}",
+      "compensate-inventory-{}",
+      "cancel-order-{}",
+    ]) {
+      expect(definition).toContain(operationId);
+    }
+    expect(definition).toMatch(/InventoryCommitOutcome.*RefundCapturedPayment/);
+    expect(definition).toMatch(
+      /PaymentRefundOutcome.*REFUNDED.*CancelFulfillmentReservation/,
+    );
+    expect(definition).toMatch(
+      /FulfillmentCancellationOutcome.*CANCELLED.*ReleaseCompensatingInventory/,
+    );
+    expect(definition).toMatch(/OrderCompensatingOutcome.*COMPENSATING/);
+  });
+
   it("compensates every reversible reservation before cancelling the Order", () => {
     const definition = JSON.stringify(
       Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
@@ -22,11 +83,15 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     expect(definition).toContain("MarkOrderCancelled");
     expect(definition).toContain("OrderCancellationOutcome");
     expect(definition).toContain("CheckoutCancelled");
+    expect(definition).toContain("MarkOrderCompensating");
+    expect(definition).toContain("compensate-order-{}");
     expect(definition).toContain("compensate-payment-{}");
     expect(definition).toContain("compensate-inventory-{}");
     expect(definition).toContain("cancel-order-{}");
-    expect(definition).toMatch(/PaymentAuthorizationOutcome.*REJECTED.*ReleaseCompensatingInventory/);
-    expect(definition).toMatch(/FulfillmentCapacityOutcome.*CancelPaymentAuthorization/);
+    expect(definition).toMatch(/PaymentAuthorizationOutcome.*REJECTED.*BeginInventoryCompensation/);
+    expect(definition).toMatch(
+      /FulfillmentCapacityOutcome.*BeginPaymentAuthorizationCompensation/,
+    );
     expect(definition).toMatch(/PaymentCancellationOutcome.*CANCELLED.*ReleaseCompensatingInventory/);
     expect(definition).toMatch(/CompensatingInventoryReleaseOutcome.*RELEASED.*MarkOrderCancelled/);
     expect(definition).toMatch(/OrderCancellationOutcome.*CANCELLED.*CheckoutCancelled/);
@@ -359,14 +424,14 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     expect(definition).toContain("JitterStrategy");
     expect(definition).toContain("FULL");
     expect(definition).toContain("ReservationDeadlineReached");
-    expect(definition).toContain("WaitForReservationDeadline");
-    expect(definition).toContain("WaitForDeadlinePrecision");
     expect(definition).toContain("WaitUntilInventoryCommit");
-    expect(definition).toContain("ReleaseExpiredInventory");
-    expect(definition).toContain("CHECKOUT_EXPIRED");
+    expect(definition).toContain("BeginCapturedPaymentCompensation");
+    expect(definition).not.toMatch(
+      /CommitInventory.*?ErrorEquals.*?States\.ALL.*?BeginCapturedPaymentCompensation/,
+    );
+    expect(definition).toContain("ReleaseCompensatingInventory");
+    expect(definition).toContain("COMPENSATION");
     expect(definition).toContain("reservationStatus");
-    expect(definition).toContain("MarkOrderExpired");
-    expect(definition).toContain("EXPIRED");
     expect(definition).toContain("TimeoutSeconds");
     expect(definition).toContain("420");
 

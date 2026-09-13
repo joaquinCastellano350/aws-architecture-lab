@@ -1,5 +1,6 @@
 import {
   GetCommand,
+  PutCommand,
   TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from "@aws-sdk/lib-dynamodb";
@@ -23,6 +24,46 @@ describe("Fulfillment persistence", () => {
       "FulfillmentHandedOff",
     ]);
     expect(dynamo.commands.filter((item) => item instanceof TransactWriteCommand)).toHaveLength(2);
+  });
+
+  it("cancels a reversible reservation once and records a compensating fact", async () => {
+    const dynamo = new FulfillmentDynamoHarness();
+    const fulfillment = repository(dynamo);
+    const cancel = command("CancelFulfillment", "compensate-fulfillment");
+
+    await fulfillment.execute(command("ReserveFulfillment", "reserve"));
+    const cancelled = await fulfillment.execute(cancel);
+    const replay = await fulfillment.execute(cancel);
+
+    expect(cancelled).toEqual(expect.objectContaining({ status: "CANCELLED" }));
+    expect(replay).toEqual(cancelled);
+    expect(dynamo.reservationStatus).toBe("CANCELLED");
+    expect(dynamo.events.map(({ eventType }) => eventType)).toEqual([
+      "FulfillmentReserved",
+      "FulfillmentCancelled",
+    ]);
+    expect(dynamo.commands.filter((item) => item instanceof PutCommand)).toHaveLength(2);
+    expect(dynamo.commands.filter((item) => item instanceof TransactWriteCommand)).toHaveLength(2);
+  });
+
+  it("records a typed rejection when cancellation reaches the irreversible pivot", async () => {
+    const dynamo = new FulfillmentDynamoHarness();
+    const fulfillment = repository(dynamo);
+    const cancel = command("CancelFulfillment", "late-cancel");
+
+    await fulfillment.execute(command("ReserveFulfillment", "reserve"));
+    await fulfillment.execute(command("HandoffFulfillment", "handoff"));
+    const rejected = await fulfillment.execute(cancel);
+
+    expect(rejected).toEqual(expect.objectContaining({
+      status: "RESERVATION_NOT_ACTIVE",
+      reservationStatus: "HANDED_OFF",
+    }));
+    await expect(fulfillment.execute(cancel)).resolves.toEqual(rejected);
+    expect(dynamo.events.map(({ eventType }) => eventType)).toEqual([
+      "FulfillmentReserved",
+      "FulfillmentHandedOff",
+    ]);
   });
 
   it("returns the recorded outcome for duplicate delivery and rejects operation reuse", async () => {
@@ -52,6 +93,7 @@ describe("Fulfillment persistence", () => {
           gets += 1;
           return {};
         }
+        if (request instanceof PutCommand) return {};
         if (request instanceof TransactWriteCommand) throw conflict;
         throw new Error("Unexpected DynamoDB command");
       },
@@ -77,6 +119,7 @@ describe("Fulfillment persistence", () => {
             ? { Item: { effects: ["BUSINESS_REJECTION"] } }
             : {};
         }
+        if (request instanceof PutCommand) return {};
         if (request instanceof TransactWriteCommand) return {};
         throw new Error("Unexpected DynamoDB command");
       },
@@ -94,12 +137,11 @@ describe("Fulfillment persistence", () => {
     );
     expect(write?.input.TransactItems).toEqual([
       expect.objectContaining({
-        Put: expect.objectContaining({
+        Update: expect.objectContaining({
           TableName: "fulfillment",
-          Item: expect.objectContaining({
-            recordType: "OPERATION",
-            state: "FAILED",
-            result: expect.objectContaining({ status: "CAPACITY_UNAVAILABLE" }),
+          ExpressionAttributeValues: expect.objectContaining({
+            ":state": "FAILED",
+            ":result": expect.objectContaining({ status: "CAPACITY_UNAVAILABLE" }),
           }),
         }),
       }),
@@ -119,7 +161,7 @@ function repository(client: FulfillmentDynamoHarness) {
 }
 
 function command(
-  commandType: "ReserveFulfillment" | "HandoffFulfillment",
+  commandType: "ReserveFulfillment" | "CancelFulfillment" | "HandoffFulfillment",
   operationId: string,
 ) {
   return {
@@ -158,6 +200,11 @@ class FulfillmentDynamoHarness {
       }
       return {};
     }
+    if (request instanceof PutCommand) {
+      const record = request.input.Item as Record<string, unknown>;
+      this.#operations.set(record.recordKey as string, structuredClone(record));
+      return {};
+    }
     if (!(request instanceof TransactWriteCommand)) {
       throw new Error("Unexpected DynamoDB command");
     }
@@ -173,8 +220,19 @@ class FulfillmentDynamoHarness {
         this.events.push(structuredClone(item.Put.Item as Record<string, unknown>));
       }
       if (item.Update?.TableName === "fulfillment") {
-        if (this.reservationStatus !== "RESERVED") throw transactionFailure();
-        this.reservationStatus = "HANDED_OFF";
+        const key = item.Update.Key?.recordKey as string;
+        if (key.startsWith("OPERATION#")) {
+          const operation = this.#operations.get(key);
+          if (operation === undefined) throw transactionFailure();
+          operation.state = item.Update.ExpressionAttributeValues?.[":state"];
+          operation.result = structuredClone(
+            item.Update.ExpressionAttributeValues?.[":result"] as Record<string, unknown>,
+          );
+          operation.updatedAt = item.Update.ExpressionAttributeValues?.[":updatedAt"];
+        } else {
+          if (this.reservationStatus !== "RESERVED") throw transactionFailure();
+          this.reservationStatus = item.Update.ExpressionAttributeValues?.[":targetStatus"] as string;
+        }
       }
     }
     return {};

@@ -4,6 +4,7 @@ import { interfaceLines, objectValidatorLines } from "./schema-codegen.mjs";
 
 const definitions = await Promise.all([
   load("reserve-fulfillment-command.v1.json", "validateReserveFulfillmentCommand"),
+  load("cancel-fulfillment-command.v1.json", "validateCancelFulfillmentCommand"),
   load("handoff-fulfillment-command.v1.json", "validateHandoffFulfillmentCommand"),
   load("fulfillment-command-outcome.v1.json", "validateFulfillmentCommandOutcome"),
 ]);
@@ -14,7 +15,7 @@ const lines = [
 
 for (const { schema } of definitions) lines.push(...interfaceLines(schema.title, schema));
 lines.push(
-  "export type FulfillmentCommand = ReserveFulfillmentCommand | HandoffFulfillmentCommand;",
+  "export type FulfillmentCommand = ReserveFulfillmentCommand | CancelFulfillmentCommand | HandoffFulfillmentCommand;",
   "",
   "export type FulfillmentContractValidationResult<T> =",
   "  | { readonly ok: true; readonly value: T }",

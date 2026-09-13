@@ -7,6 +7,7 @@ const definitions = await Promise.all([
   load("order-inventory-unavailable-event.v1.json", "validateOrderInventoryUnavailableEvent"),
   load("order-expired-event.v1.json", "validateOrderExpiredEvent"),
   load("order-confirmed-event.v1.json", "validateOrderConfirmedEvent"),
+  load("order-compensating-event.v1.json", "validateOrderCompensatingEvent"),
   load("order-cancelled-event.v1.json", "validateOrderCancelledEvent"),
 ]);
 const lines = [

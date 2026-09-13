@@ -1,5 +1,6 @@
 import {
   validateFulfillmentCommandOutcome,
+  validateCancelFulfillmentCommand,
   validateHandoffFulfillmentCommand,
   validateReserveFulfillmentCommand,
   type FulfillmentCommand,
@@ -17,6 +18,8 @@ export function createFulfillmentCommandHandler(fulfillment: FulfillmentCommandE
     const commandType = commandTypeOf(event);
     const validation = commandType === "ReserveFulfillment"
       ? validateReserveFulfillmentCommand(event)
+      : commandType === "CancelFulfillment"
+        ? validateCancelFulfillmentCommand(event)
       : commandType === "HandoffFulfillment"
         ? validateHandoffFulfillmentCommand(event)
         : undefined;

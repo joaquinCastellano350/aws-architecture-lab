@@ -4,6 +4,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
+  PutCommand,
   TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type {
@@ -34,8 +35,8 @@ export class DynamoFulfillmentRepository {
 
   public async execute(command: FulfillmentCommand): Promise<FulfillmentCommandOutcome> {
     const payloadHash = stablePayloadHash(command);
-    const recorded = await this.#operation(command.operationId);
-    if (recorded !== undefined) return recordedOutcome(recorded, payloadHash);
+    const recorded = await this.#startOperation(command.operationId, payloadHash);
+    if (recorded !== undefined) return recorded;
 
     if (
       command.commandType === "ReserveFulfillment" &&
@@ -45,7 +46,11 @@ export class DynamoFulfillmentRepository {
     }
 
     const now = this.#clock().toISOString();
-    const status = command.commandType === "ReserveFulfillment" ? "RESERVED" : "HANDED_OFF";
+    const status = command.commandType === "ReserveFulfillment"
+      ? "RESERVED"
+      : command.commandType === "CancelFulfillment"
+        ? "CANCELLED"
+        : "HANDED_OFF";
     const outcome: FulfillmentCommandOutcome = {
       schemaVersion: "1.0",
       operationId: command.operationId,
@@ -53,17 +58,11 @@ export class DynamoFulfillmentRepository {
       reservationId: command.reservationId,
       status,
     };
-    const operation: FulfillmentOperation = {
-      recordKey: operationKey(command.operationId),
-      recordType: "OPERATION",
-      operationId: command.operationId,
-      payloadHash,
-      state: "SUCCEEDED",
-      result: outcome,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const eventType = status === "RESERVED" ? "FulfillmentReserved" : "FulfillmentHandedOff";
+    const eventType = status === "RESERVED"
+      ? "FulfillmentReserved"
+      : status === "CANCELLED"
+        ? "FulfillmentCancelled"
+        : "FulfillmentHandedOff";
     const event = {
       eventId: this.#eventId(),
       eventType,
@@ -100,13 +99,13 @@ export class DynamoFulfillmentRepository {
           Update: {
             TableName: this.tableName,
             Key: { recordKey: reservationKey(command.reservationId) },
-            UpdateExpression: "SET #status = :handedOff, updatedAt = :updatedAt",
+            UpdateExpression: "SET #status = :targetStatus, updatedAt = :updatedAt",
             ConditionExpression:
               "#status = :reserved AND checkoutId = :checkoutId AND correlationId = :correlationId",
             ExpressionAttributeNames: { "#status": "status" },
             ExpressionAttributeValues: {
               ":reserved": "RESERVED",
-              ":handedOff": "HANDED_OFF",
+              ":targetStatus": status,
               ":checkoutId": command.checkoutId,
               ":correlationId": command.correlationId,
               ":updatedAt": now,
@@ -117,13 +116,14 @@ export class DynamoFulfillmentRepository {
       await this.#client.send(new TransactWriteCommand({
         TransactItems: [
           stateChange,
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: operation,
-              ConditionExpression: "attribute_not_exists(recordKey)",
-            },
-          },
+          operationCompletionUpdate(
+            this.tableName,
+            command.operationId,
+            payloadHash,
+            outcome,
+            "SUCCEEDED",
+            now,
+          ),
           {
             Put: {
               TableName: this.outboxTableName,
@@ -137,8 +137,20 @@ export class DynamoFulfillmentRepository {
     } catch (error) {
       if (!isTransactionCancellation(error)) throw error;
       const concurrent = await this.#operation(command.operationId);
-      if (concurrent !== undefined) return recordedOutcome(concurrent, payloadHash);
+      if (concurrent !== undefined && concurrent.state !== "IN_PROGRESS") {
+        return recordedOutcome(concurrent, payloadHash);
+      }
       if (hasOnlyConditionalFailures(error)) {
+        if (command.commandType !== "ReserveFulfillment") {
+          const reservation = await this.#reservation(command.reservationId);
+          if (reservation !== undefined && reservation.status !== "RESERVED") {
+            return this.#recordReservationNotActive(
+              command,
+              payloadHash,
+              reservation.status,
+            );
+          }
+        }
         throw new Error("Fulfillment state invariant violated");
       }
       throw error;
@@ -152,6 +164,67 @@ export class DynamoFulfillmentRepository {
       ConsistentRead: true,
     }));
     return response.Item as FulfillmentOperation | undefined;
+  }
+
+  async #startOperation(
+    operationId: string,
+    payloadHash: string,
+  ): Promise<FulfillmentCommandOutcome | undefined> {
+    const existing = await this.#operation(operationId);
+    if (existing !== undefined) {
+      assertPayloadHash(existing, payloadHash);
+      return existing.state === "IN_PROGRESS" ? undefined : recordedOutcome(existing, payloadHash);
+    }
+    const now = this.#clock().toISOString();
+    try {
+      await this.#client.send(new PutCommand({
+        TableName: this.tableName,
+        Item: {
+          recordKey: operationKey(operationId),
+          recordType: "OPERATION",
+          operationId,
+          payloadHash,
+          state: "IN_PROGRESS",
+          createdAt: now,
+          updatedAt: now,
+        } satisfies FulfillmentOperation,
+        ConditionExpression: "attribute_not_exists(recordKey)",
+      }));
+      return undefined;
+    } catch (error) {
+      if (!isConditionalConflict(error)) throw error;
+      const concurrent = await this.#operation(operationId);
+      if (concurrent === undefined) throw error;
+      assertPayloadHash(concurrent, payloadHash);
+      return concurrent.state === "IN_PROGRESS"
+        ? undefined
+        : recordedOutcome(concurrent, payloadHash);
+    }
+  }
+
+  async #reservation(reservationId: string): Promise<FulfillmentReservation | undefined> {
+    const response = await this.#client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { recordKey: reservationKey(reservationId) },
+      ConsistentRead: true,
+    }));
+    return response.Item as FulfillmentReservation | undefined;
+  }
+
+  async #recordReservationNotActive(
+    command: Exclude<FulfillmentCommand, { readonly commandType: "ReserveFulfillment" }>,
+    payloadHash: string,
+    reservationStatus: FulfillmentReservation["status"],
+  ): Promise<FulfillmentCommandOutcome> {
+    const result: FulfillmentCommandOutcome = {
+      schemaVersion: "1.0",
+      operationId: command.operationId,
+      checkoutId: command.checkoutId,
+      reservationId: command.reservationId,
+      status: "RESERVATION_NOT_ACTIVE",
+      reservationStatus,
+    };
+    return this.#recordFailedOperation(command.operationId, payloadHash, result);
   }
 
   async #capacityUnavailable(reservationId: string): Promise<boolean> {
@@ -173,7 +246,6 @@ export class DynamoFulfillmentRepository {
     command: Extract<FulfillmentCommand, { readonly commandType: "ReserveFulfillment" }>,
     payloadHash: string,
   ): Promise<FulfillmentCommandOutcome> {
-    const now = this.#clock().toISOString();
     const result: FulfillmentCommandOutcome = {
       schemaVersion: "1.0",
       operationId: command.operationId,
@@ -181,31 +253,32 @@ export class DynamoFulfillmentRepository {
       reservationId: command.reservationId,
       status: "CAPACITY_UNAVAILABLE",
     };
-    const operation: FulfillmentOperation = {
-      recordKey: operationKey(command.operationId),
-      recordType: "OPERATION",
-      operationId: command.operationId,
-      payloadHash,
-      state: "FAILED",
-      result,
-      createdAt: now,
-      updatedAt: now,
-    };
+    return this.#recordFailedOperation(command.operationId, payloadHash, result);
+  }
+
+  async #recordFailedOperation(
+    operationId: string,
+    payloadHash: string,
+    result: FulfillmentCommandOutcome,
+  ): Promise<FulfillmentCommandOutcome> {
+    const now = this.#clock().toISOString();
     try {
       await this.#client.send(new TransactWriteCommand({
-        TransactItems: [{
-          Put: {
-            TableName: this.tableName,
-            Item: operation,
-            ConditionExpression: "attribute_not_exists(recordKey)",
-          },
-        }],
+        TransactItems: [operationCompletionUpdate(
+          this.tableName,
+          operationId,
+          payloadHash,
+          result,
+          "FAILED",
+          now,
+        )],
       }));
       return result;
     } catch (error) {
       if (!isTransactionCancellation(error)) throw error;
-      const concurrent = await this.#operation(command.operationId);
-      if (concurrent === undefined) throw error;
+      if (!hasOnlyConditionalFailures(error)) throw error;
+      const concurrent = await this.#operation(operationId);
+      if (concurrent === undefined || concurrent.state === "IN_PROGRESS") throw error;
       return recordedOutcome(concurrent, payloadHash);
     }
   }
@@ -216,10 +289,15 @@ interface FulfillmentOperation {
   readonly recordType: "OPERATION";
   readonly operationId: string;
   readonly payloadHash: string;
-  readonly state: "SUCCEEDED" | "FAILED";
-  readonly result: FulfillmentCommandOutcome;
+  readonly state: "IN_PROGRESS" | "SUCCEEDED" | "FAILED";
+  readonly result?: FulfillmentCommandOutcome;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+interface FulfillmentReservation {
+  readonly reservationId: string;
+  readonly status: "RESERVED" | "CANCELLED" | "HANDED_OFF";
 }
 
 export interface FulfillmentRepositoryDependencies {
@@ -233,10 +311,43 @@ function recordedOutcome(
   operation: FulfillmentOperation,
   payloadHash: string,
 ): FulfillmentCommandOutcome {
+  assertPayloadHash(operation, payloadHash);
+  if (operation.result === undefined) {
+    throw new Error("Fulfillment operation is still in progress");
+  }
+  return operation.result;
+}
+
+function assertPayloadHash(operation: FulfillmentOperation, payloadHash: string): void {
   if (operation.payloadHash !== payloadHash) {
     throw new Error("Fulfillment operation ID was reused with a different payload");
   }
-  return operation.result;
+}
+
+function operationCompletionUpdate(
+  tableName: string,
+  operationId: string,
+  payloadHash: string,
+  result: FulfillmentCommandOutcome,
+  state: "SUCCEEDED" | "FAILED",
+  now: string,
+) {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { recordKey: operationKey(operationId) },
+      UpdateExpression: "SET #state = :state, #result = :result, updatedAt = :updatedAt",
+      ConditionExpression: "#state = :inProgress AND payloadHash = :payloadHash",
+      ExpressionAttributeNames: { "#state": "state", "#result": "result" },
+      ExpressionAttributeValues: {
+        ":state": state,
+        ":inProgress": "IN_PROGRESS",
+        ":payloadHash": payloadHash,
+        ":result": result,
+        ":updatedAt": now,
+      },
+    },
+  };
 }
 
 function operationKey(operationId: string): string {
@@ -253,6 +364,10 @@ function failurePlanKey(reservationId: string): string {
 
 function isTransactionCancellation(error: unknown): boolean {
   return error instanceof Error && error.name === "TransactionCanceledException";
+}
+
+function isConditionalConflict(error: unknown): boolean {
+  return error instanceof Error && error.name === "ConditionalCheckFailedException";
 }
 
 function hasOnlyConditionalFailures(error: unknown): boolean {

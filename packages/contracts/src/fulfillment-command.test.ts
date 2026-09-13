@@ -2,18 +2,29 @@ import { describe, expect, it } from "vitest";
 
 import {
   validateFulfillmentCommandOutcome,
+  validateCancelFulfillmentCommand,
   validateHandoffFulfillmentCommand,
   validateReserveFulfillmentCommand,
 } from "./generated/fulfillment-command.js";
 
 describe("Fulfillment command JSON schemas", () => {
-  it("accepts versioned reservation and irreversible-handoff contracts", () => {
+  it("accepts versioned reservation, cancellation, and irreversible-handoff contracts", () => {
     expect(validateReserveFulfillmentCommand(command("ReserveFulfillment", "reserve"))).toEqual(
       expect.objectContaining({ ok: true }),
     );
     expect(validateHandoffFulfillmentCommand(command("HandoffFulfillment", "handoff"))).toEqual(
       expect.objectContaining({ ok: true }),
     );
+    expect(validateCancelFulfillmentCommand(command("CancelFulfillment", "cancel"))).toEqual(
+      expect.objectContaining({ ok: true }),
+    );
+    expect(validateFulfillmentCommandOutcome({
+      schemaVersion: "1.0",
+      operationId: "cancel-checkout-123",
+      checkoutId: "checkout-123",
+      reservationId: "fulfillment-checkout-123",
+      status: "CANCELLED",
+    })).toEqual(expect.objectContaining({ ok: true }));
     expect(validateFulfillmentCommandOutcome({
       schemaVersion: "1.0",
       operationId: "handoff-checkout-123",
@@ -38,7 +49,10 @@ describe("Fulfillment command JSON schemas", () => {
   });
 });
 
-function command(commandType: "ReserveFulfillment" | "HandoffFulfillment", prefix: string) {
+function command(
+  commandType: "ReserveFulfillment" | "CancelFulfillment" | "HandoffFulfillment",
+  prefix: string,
+) {
   return {
     schemaVersion: "1.0",
     commandType,

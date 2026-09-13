@@ -49,6 +49,8 @@ import {
   JsonPath,
   JitterType,
   LogLevel,
+  Pass,
+  Result,
   StateMachine,
   StateMachineType,
   Succeed,
@@ -66,6 +68,23 @@ const orderPendingEventType = "OrderPending";
 const inventoryEventSource = "aws-architecture-lab.inventory";
 const paymentEventSource = "aws-architecture-lab.payment";
 const fulfillmentEventSource = "aws-architecture-lab.fulfillment";
+const internalCommandTransientErrors = [
+  "Lambda.ServiceException",
+  "Lambda.AWSLambdaException",
+  "Lambda.SdkClientException",
+  "TransactionCanceledException",
+  "TransactionConflictException",
+  "ProvisionedThroughputExceededException",
+  "ThrottlingException",
+  "InternalServerError",
+];
+const paymentCommandTransientErrors = [
+  ...internalCommandTransientErrors,
+  "PaymentProviderThrottledError",
+  "PaymentProviderTimeoutError",
+  "PaymentProviderTransientError",
+  "PaymentProviderResponseLostError",
+];
 
 export interface MarketplaceCheckoutStackProps extends StackProps {
   readonly enableFakePaymentFailurePlans?: boolean;
@@ -655,7 +674,30 @@ export class MarketplaceCheckoutStack extends Stack {
       resultPath: "$.paymentCapture",
       retryOnServiceExceptions: false,
     });
-    this.addPaymentCommandRetry(capturePayment);
+    this.addPaymentCommandRetry(capturePayment, { retryResponseLoss: false });
+    const retrievePaymentAfterCaptureFailure = new LambdaInvoke(
+      this,
+      "RetrievePaymentAfterCaptureFailure",
+      {
+        lambdaFunction: paymentFunctionVersion as IFunction,
+        payload: TaskInput.fromObject({
+          schemaVersion: "1.0",
+          commandType: "RetrievePayment",
+          operationId: JsonPath.format(
+            "reconcile-capture-{}",
+            JsonPath.stringAt("$.checkoutId"),
+          ),
+          checkoutId: JsonPath.stringAt("$.checkoutId"),
+          paymentId: JsonPath.format("payment-{}", JsonPath.stringAt("$.checkoutId")),
+          correlationId: JsonPath.stringAt("$.correlationId"),
+          causationId: JsonPath.stringAt("$$.Execution.Id"),
+        }),
+        payloadResponseOnly: true,
+        resultPath: "$.paymentCaptureReconciliation",
+        retryOnServiceExceptions: false,
+      },
+    );
+    this.addPaymentCommandRetry(retrievePaymentAfterCaptureFailure);
     const handoffFulfillment = new SqsSendMessage(this, "HandoffFulfillment", {
       queue: fulfillmentQueue,
       integrationPattern: IntegrationPattern.WAIT_FOR_TASK_TOKEN,
@@ -678,23 +720,6 @@ export class MarketplaceCheckoutStack extends Stack {
       }),
       resultPath: "$.fulfillmentHandoff",
     });
-    const releaseExpiredInventory = new LambdaInvoke(this, "ReleaseExpiredInventory", {
-      lambdaFunction: inventoryFunctionVersion as IFunction,
-      payload: TaskInput.fromObject({
-        schemaVersion: "1.0",
-        commandType: "ReleaseInventory",
-        operationId: JsonPath.format("expire-workflow-{}", JsonPath.stringAt("$.inventoryReservation.reservationId")),
-        checkoutId: JsonPath.stringAt("$.checkoutId"),
-        reservationId: JsonPath.stringAt("$.inventoryReservation.reservationId"),
-        releaseReason: "CHECKOUT_EXPIRED",
-        correlationId: JsonPath.stringAt("$.correlationId"),
-        causationId: JsonPath.stringAt("$$.Execution.Id"),
-      }),
-      payloadResponseOnly: true,
-      resultPath: "$.inventoryRelease",
-      retryOnServiceExceptions: false,
-    });
-    this.addInternalCommandRetry(releaseExpiredInventory);
     const cancelPaymentAuthorization = new LambdaInvoke(this, "CancelPaymentAuthorization", {
       lambdaFunction: paymentFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
@@ -711,6 +736,49 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addPaymentCommandRetry(cancelPaymentAuthorization);
+    const refundCapturedPayment = new LambdaInvoke(this, "RefundCapturedPayment", {
+      lambdaFunction: paymentFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "RefundPayment",
+        operationId: JsonPath.format("refund-payment-{}", JsonPath.stringAt("$.checkoutId")),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        paymentId: JsonPath.format("payment-{}", JsonPath.stringAt("$.checkoutId")),
+        amountMinor: 1250,
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.paymentRefund",
+      retryOnServiceExceptions: false,
+    });
+    this.addPaymentCommandRetry(refundCapturedPayment);
+    const cancelFulfillmentReservation = new LambdaInvoke(
+      this,
+      "CancelFulfillmentReservation",
+      {
+        lambdaFunction: fulfillmentFunctionVersion as IFunction,
+        payload: TaskInput.fromObject({
+          schemaVersion: "1.0",
+          commandType: "CancelFulfillment",
+          operationId: JsonPath.format(
+            "cancel-fulfillment-{}",
+            JsonPath.stringAt("$.checkoutId"),
+          ),
+          checkoutId: JsonPath.stringAt("$.checkoutId"),
+          reservationId: JsonPath.format(
+            "fulfillment-{}",
+            JsonPath.stringAt("$.checkoutId"),
+          ),
+          correlationId: JsonPath.stringAt("$.correlationId"),
+          causationId: JsonPath.stringAt("$$.Execution.Id"),
+        }),
+        payloadResponseOnly: true,
+        resultPath: "$.fulfillmentCancellation",
+        retryOnServiceExceptions: false,
+      },
+    );
+    this.addInternalCommandRetry(cancelFulfillmentReservation);
     const releaseCompensatingInventory = new LambdaInvoke(
       this,
       "ReleaseCompensatingInventory",
@@ -735,6 +803,60 @@ export class MarketplaceCheckoutStack extends Stack {
       },
     );
     this.addInternalCommandRetry(releaseCompensatingInventory);
+    const markOrderCompensating = new LambdaInvoke(this, "MarkOrderCompensating", {
+      lambdaFunction: orderFunctionVersion as IFunction,
+      payload: TaskInput.fromObject({
+        schemaVersion: "1.0",
+        commandType: "MarkOrderCompensating",
+        operationId: JsonPath.format(
+          "compensate-order-{}",
+          JsonPath.stringAt("$.checkoutId"),
+        ),
+        checkoutId: JsonPath.stringAt("$.checkoutId"),
+        correlationId: JsonPath.stringAt("$.correlationId"),
+        causationId: JsonPath.stringAt("$$.Execution.Id"),
+      }),
+      payloadResponseOnly: true,
+      resultPath: "$.order",
+      retryOnServiceExceptions: false,
+    });
+    this.addInternalCommandRetry(markOrderCompensating);
+    const beginInventoryCompensation = new Pass(this, "BeginInventoryCompensation", {
+      result: Result.fromObject({ kind: "INVENTORY_ONLY" }),
+      resultPath: "$.compensation",
+    });
+    const beginPaymentAuthorizationCompensation = new Pass(
+      this,
+      "BeginPaymentAuthorizationCompensation",
+      {
+        result: Result.fromObject({ kind: "PAYMENT_AUTHORIZATION" }),
+        resultPath: "$.compensation",
+      },
+    );
+    const beginReservedFulfillmentCompensation = new Pass(
+      this,
+      "BeginReservedFulfillmentCompensation",
+      {
+        result: Result.fromObject({ kind: "RESERVED_FULFILLMENT" }),
+        resultPath: "$.compensation",
+      },
+    );
+    const beginCapturedPaymentCompensation = new Pass(
+      this,
+      "BeginCapturedPaymentCompensation",
+      {
+        result: Result.fromObject({ kind: "CAPTURED_PAYMENT" }),
+        resultPath: "$.compensation",
+      },
+    );
+    for (const compensationStart of [
+      beginInventoryCompensation,
+      beginPaymentAuthorizationCompensation,
+      beginReservedFulfillmentCompensation,
+      beginCapturedPaymentCompensation,
+    ]) {
+      compensationStart.next(markOrderCompensating);
+    }
     const inventoryUnavailable = new Succeed(this, "InventoryUnavailable");
     const markOrderInventoryUnavailable = new LambdaInvoke(this, "MarkOrderInventoryUnavailable", {
       lambdaFunction: orderFunctionVersion as IFunction,
@@ -769,21 +891,6 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(markOrderCancelled);
-    const markOrderExpired = new LambdaInvoke(this, "MarkOrderExpired", {
-      lambdaFunction: orderFunctionVersion as IFunction,
-      payload: TaskInput.fromObject({
-        schemaVersion: "1.0",
-        commandType: "MarkOrderExpired",
-        operationId: JsonPath.format("expire-order-workflow-{}", JsonPath.stringAt("$.inventoryReservation.reservationId")),
-        checkoutId: JsonPath.stringAt("$.checkoutId"),
-        correlationId: JsonPath.stringAt("$.correlationId"),
-        causationId: JsonPath.stringAt("$$.Execution.Id"),
-      }),
-      payloadResponseOnly: true,
-      resultPath: "$.order",
-      retryOnServiceExceptions: false,
-    });
-    this.addInternalCommandRetry(markOrderExpired);
     const markOrderConfirmed = new LambdaInvoke(this, "MarkOrderConfirmed", {
       lambdaFunction: orderFunctionVersion as IFunction,
       payload: TaskInput.fromObject({
@@ -802,9 +909,35 @@ export class MarketplaceCheckoutStack extends Stack {
       retryOnServiceExceptions: false,
     });
     this.addInternalCommandRetry(markOrderConfirmed);
-    const orderExpired = new Succeed(this, "OrderExpired");
     const checkoutCancelled = new Succeed(this, "CheckoutCancelled");
     const checkoutConfirmed = new Succeed(this, "CheckoutConfirmed");
+    const compensationPlan = new Choice(this, "CompensationPlan")
+      .when(
+        Condition.stringEquals("$.compensation.kind", "INVENTORY_ONLY"),
+        releaseCompensatingInventory,
+      )
+      .when(
+        Condition.stringEquals("$.compensation.kind", "PAYMENT_AUTHORIZATION"),
+        cancelPaymentAuthorization,
+      )
+      .when(
+        Condition.stringEquals("$.compensation.kind", "RESERVED_FULFILLMENT"),
+        cancelFulfillmentReservation,
+      )
+      .when(
+        Condition.stringEquals("$.compensation.kind", "CAPTURED_PAYMENT"),
+        refundCapturedPayment,
+      )
+      .otherwise(new Fail(this, "CompensationPlanRejected", {
+        cause: "The Saga selected an unsupported compensation plan.",
+        error: "SagaInvariantViolation",
+      }));
+    markOrderCompensating.next(new Choice(this, "OrderCompensatingOutcome")
+      .when(Condition.stringEquals("$.order.status", "COMPENSATING"), compensationPlan)
+      .otherwise(new Fail(this, "OrderCompensatingRejected", {
+        cause: "Order did not confirm that compensation is in progress.",
+        error: "OrderInvariantViolation",
+      })));
     markOrderCancelled.next(new Choice(this, "OrderCancellationOutcome")
       .when(Condition.stringEquals("$.order.status", "CANCELLED"), checkoutCancelled)
       .otherwise(new Fail(this, "OrderCancellationRejected", {
@@ -824,7 +957,7 @@ export class MarketplaceCheckoutStack extends Stack {
         Condition.stringEquals("$.inventoryCompensation.reservationStatus", "RELEASED"),
       ), markOrderCancelled)
       .otherwise(new Fail(this, "CompensatingInventoryReleaseRejected", {
-        cause: "Inventory release was not confirmed, so the Order remains pending.",
+        cause: "Inventory release was not confirmed, so the Order remains compensating.",
         error: "InventoryCompensationFailure",
       })));
     cancelPaymentAuthorization.next(new Choice(this, "PaymentCancellationOutcome")
@@ -835,6 +968,31 @@ export class MarketplaceCheckoutStack extends Stack {
       .otherwise(new Fail(this, "PaymentCancellationRejected", {
         cause: "Payment cancellation was not confirmed, so later compensation did not run.",
         error: "PaymentCompensationFailure",
+      })));
+    refundCapturedPayment.next(new Choice(this, "PaymentRefundOutcome")
+      .when(
+        Condition.stringEquals("$.paymentRefund.status", "REFUNDED"),
+        cancelFulfillmentReservation,
+      )
+      .otherwise(new Fail(this, "PaymentRefundRejected", {
+        cause: "Payment refund was not confirmed, so later compensation did not run.",
+        error: "PaymentCompensationFailure",
+      })));
+    cancelFulfillmentReservation.next(new Choice(this, "FulfillmentCancellationOutcome")
+      .when(
+        Condition.and(
+          Condition.stringEquals("$.fulfillmentCancellation.status", "CANCELLED"),
+          Condition.stringEquals("$.compensation.kind", "CAPTURED_PAYMENT"),
+        ),
+        releaseCompensatingInventory,
+      )
+      .when(
+        Condition.stringEquals("$.fulfillmentCancellation.status", "CANCELLED"),
+        cancelPaymentAuthorization,
+      )
+      .otherwise(new Fail(this, "FulfillmentCancellationRejected", {
+        cause: "Fulfillment cancellation was not confirmed, so compensation stopped.",
+        error: "FulfillmentCompensationFailure",
       })));
     markOrderConfirmed.next(new Choice(this, "OrderConfirmationOutcome")
       .when(Condition.stringEquals("$.order.status", "CONFIRMED"), checkoutConfirmed)
@@ -851,26 +1009,6 @@ export class MarketplaceCheckoutStack extends Stack {
         cause: "Fulfillment returned an unsupported handoff outcome.",
         error: "FulfillmentInvariantViolation",
       })));
-    markOrderExpired.next(new Choice(this, "OrderExpiryOutcome")
-      .when(Condition.stringEquals("$.order.status", "EXPIRED"), orderExpired)
-      .otherwise(new Fail(this, "OrderExpiryOutcomeRejected", {
-        cause: "Order returned an unsupported expiry outcome.",
-        error: "OrderInvariantViolation",
-      })));
-    releaseExpiredInventory.next(new Choice(this, "ExpiredInventoryReleaseOutcome")
-      .when(Condition.stringEquals("$.inventoryRelease.status", "RELEASED"), markOrderExpired)
-      .when(Condition.and(
-        Condition.stringEquals("$.inventoryRelease.status", "RESERVATION_NOT_ACTIVE"),
-        Condition.stringEquals("$.inventoryRelease.reservationStatus", "RELEASED"),
-      ), markOrderExpired)
-      .when(Condition.and(
-        Condition.stringEquals("$.inventoryRelease.status", "RESERVATION_NOT_ACTIVE"),
-        Condition.stringEquals("$.inventoryRelease.reservationStatus", "COMMITTED"),
-      ), handoffFulfillment)
-      .otherwise(new Fail(this, "ExpiredInventoryReleaseRejected", {
-        cause: "Inventory returned an unsupported expiry release outcome.",
-        error: "InventoryInvariantViolation",
-      })));
     markOrderInventoryUnavailable.next(new Choice(this, "OrderInventoryOutcome")
       .when(
         Condition.stringEquals("$.order.status", "INVENTORY_UNAVAILABLE"),
@@ -880,54 +1018,65 @@ export class MarketplaceCheckoutStack extends Stack {
         cause: "Order returned an unsupported Inventory-unavailable outcome.",
         error: "OrderInvariantViolation",
       })));
-    const invalidInventoryCommit = new Fail(this, "InventoryCommitRejected", {
-      cause: "A reserved Inventory record could not be committed.",
-      error: "InventoryInvariantViolation",
-    });
     commitInventory.next(new Choice(this, "InventoryCommitOutcome")
       .when(Condition.stringEquals("$.inventoryCommit.status", "COMMITTED"), handoffFulfillment)
       .when(Condition.and(
         Condition.stringEquals("$.inventoryCommit.status", "RESERVATION_NOT_ACTIVE"),
         Condition.stringEquals("$.inventoryCommit.reservationStatus", "COMMITTED"),
       ), handoffFulfillment)
-      .when(
-        Condition.stringEquals("$.inventoryCommit.status", "RESERVATION_NOT_ACTIVE"),
-        releaseExpiredInventory,
-      )
-      .otherwise(invalidInventoryCommit));
+      .otherwise(beginCapturedPaymentCompensation));
     const reservationDeadlineReached = new Choice(this, "ReservationDeadlineReached")
       .when(
         Condition.timestampLessThanEqualsJsonPath(
           "$.reservationExpiresAt",
           "$$.State.EnteredTime",
         ),
-        releaseExpiredInventory,
+        beginCapturedPaymentCompensation,
       )
       .otherwise(commitInventory);
-    const waitForReservationDeadline = new Wait(this, "WaitForReservationDeadline", {
-      time: WaitTime.timestampPath("$.reservationExpiresAt"),
-    });
-    const waitForDeadlinePrecision = new Wait(this, "WaitForDeadlinePrecision", {
-      time: WaitTime.duration(Duration.seconds(1)),
-    });
-    waitForReservationDeadline.next(waitForDeadlinePrecision);
-    waitForDeadlinePrecision.next(releaseExpiredInventory);
-    commitInventory.addCatch(waitForReservationDeadline, {
+    commitInventory.addCatch(beginCapturedPaymentCompensation, {
+      errors: internalCommandTransientErrors,
       resultPath: "$.inventoryCommitError",
     });
     const waitUntilInventoryCommit = new Wait(this, "WaitUntilInventoryCommit", {
       time: WaitTime.timestampPath("$.inventoryCommitAt"),
     });
-    waitUntilInventoryCommit.next(reservationDeadlineReached);
+    // inventoryCommitAt is a deployed-test hook: it deliberately lets the domain
+    // reject an expired commit so the post-capture compensation path is exercised.
+    waitUntilInventoryCommit.next(commitInventory);
     const inventoryCommitTiming = new Choice(this, "InventoryCommitTiming")
       .when(Condition.isPresent("$.inventoryCommitAt"), waitUntilInventoryCommit)
       .otherwise(reservationDeadlineReached);
     capturePayment.next(new Choice(this, "PaymentCaptureOutcome")
       .when(Condition.stringEquals("$.paymentCapture.status", "CAPTURED"), inventoryCommitTiming)
-      .otherwise(new Fail(this, "PaymentCaptureRejected", {
-        cause: "Payment returned an unsupported capture outcome.",
-        error: "PaymentCaptureFailure",
-      })));
+      .otherwise(retrievePaymentAfterCaptureFailure));
+    capturePayment.addCatch(retrievePaymentAfterCaptureFailure, {
+      errors: paymentCommandTransientErrors,
+      resultPath: "$.paymentCaptureError",
+    });
+    retrievePaymentAfterCaptureFailure.next(
+      new Choice(this, "PaymentCaptureReconciliationOutcome")
+        .when(
+          Condition.stringEquals("$.paymentCaptureReconciliation.status", "CAPTURED"),
+          beginCapturedPaymentCompensation,
+        )
+        .when(
+          Condition.stringEquals("$.paymentCaptureReconciliation.status", "AUTHORIZED"),
+          beginReservedFulfillmentCompensation,
+        )
+        .when(
+          Condition.stringEquals("$.paymentCaptureReconciliation.status", "CANCELLED"),
+          beginReservedFulfillmentCompensation,
+        )
+        .when(
+          Condition.stringEquals("$.paymentCaptureReconciliation.status", "REFUNDED"),
+          beginCapturedPaymentCompensation,
+        )
+        .otherwise(new Fail(this, "PaymentCaptureReconciliationRejected", {
+          cause: "Payment capture could not be reconciled to a safe compensating action.",
+          error: "PaymentCaptureFailure",
+        })),
+    );
     const fulfillmentReservationRejected = new Fail(this, "FulfillmentReservationRejected", {
       cause: "Fulfillment returned an unsupported reservation outcome.",
       error: "FulfillmentInvariantViolation",
@@ -939,7 +1088,7 @@ export class MarketplaceCheckoutStack extends Stack {
       )
       .when(
         Condition.stringEquals("$.fulfillmentReservation.status", "CAPACITY_UNAVAILABLE"),
-        cancelPaymentAuthorization,
+        beginPaymentAuthorizationCompensation,
       )
       .otherwise(fulfillmentReservationRejected);
     reserveFulfillment.next(fulfillmentCapacityOutcome);
@@ -950,13 +1099,13 @@ export class MarketplaceCheckoutStack extends Stack {
       )
       .when(
         Condition.stringEquals("$.paymentAuthorization.status", "REJECTED"),
-        releaseCompensatingInventory,
+        beginInventoryCompensation,
       )
       .otherwise(new Fail(this, "PaymentAuthorizationRejected", {
         cause: "Payment returned an unsupported authorization outcome.",
         error: "PaymentAuthorizationFailure",
       })));
-    authorizePayment.addCatch(releaseCompensatingInventory, {
+    authorizePayment.addCatch(beginInventoryCompensation, {
       errors: [
         "PaymentProviderTransientError",
         "PaymentProviderThrottledError",
@@ -1116,6 +1265,9 @@ export class MarketplaceCheckoutStack extends Stack {
     new CfnOutput(this, "PaymentEventSource", { value: paymentEventSource });
     new CfnOutput(this, "PaymentCommandFunctionName", { value: paymentFunction.functionName });
     new CfnOutput(this, "FulfillmentTableName", { value: fulfillmentTable.tableName });
+    new CfnOutput(this, "FulfillmentOutboxTableName", {
+      value: fulfillmentOutboxTable.tableName,
+    });
     new CfnOutput(this, "FulfillmentEventSource", { value: fulfillmentEventSource });
     new CfnOutput(this, "FulfillmentCommandFunctionName", {
       value: fulfillmentFunction.functionName,
@@ -1176,16 +1328,7 @@ export class MarketplaceCheckoutStack extends Stack {
 
   private addInternalCommandRetry(task: LambdaInvoke): void {
     task.addRetry({
-      errors: [
-        "Lambda.ServiceException",
-        "Lambda.AWSLambdaException",
-        "Lambda.SdkClientException",
-        "TransactionCanceledException",
-        "TransactionConflictException",
-        "ProvisionedThroughputExceededException",
-        "ThrottlingException",
-        "InternalServerError",
-      ],
+      errors: internalCommandTransientErrors,
       interval: Duration.seconds(1),
       maxAttempts: 2,
       backoffRate: 2,
@@ -1193,22 +1336,17 @@ export class MarketplaceCheckoutStack extends Stack {
     });
   }
 
-  private addPaymentCommandRetry(task: LambdaInvoke): void {
+  private addPaymentCommandRetry(
+    task: LambdaInvoke,
+    options: { readonly retryResponseLoss?: boolean } = {},
+  ): void {
+    const errors = options.retryResponseLoss === false
+      ? paymentCommandTransientErrors.filter(
+          (error) => error !== "PaymentProviderResponseLostError",
+        )
+      : paymentCommandTransientErrors;
     task.addRetry({
-      errors: [
-        "Lambda.ServiceException",
-        "Lambda.AWSLambdaException",
-        "Lambda.SdkClientException",
-        "TransactionCanceledException",
-        "TransactionConflictException",
-        "ProvisionedThroughputExceededException",
-        "ThrottlingException",
-        "InternalServerError",
-        "PaymentProviderThrottledError",
-        "PaymentProviderTimeoutError",
-        "PaymentProviderTransientError",
-        "PaymentProviderResponseLostError",
-      ],
+      errors,
       interval: Duration.seconds(1),
       maxAttempts: 2,
       backoffRate: 2,

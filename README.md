@@ -124,14 +124,18 @@ errors, URLs, or persistence.
 Before Payment capture, failure is terminal but fully reversible. Inventory rejection ends
 without compensation. Payment authorization rejection or bounded retry exhaustion releases
 Inventory once. Fulfillment reservation failure cancels the authorization and then releases
-Inventory in reverse order. Stable operation IDs make every compensation idempotent, and the
-Order becomes `CANCELLED` only after all required compensation outcomes are confirmed.
+Inventory in reverse order. The Order exposes `COMPENSATING` before recovery starts.
 
-The OpenAPI 3.0 contract is versioned `4.0.0` and exposes `CANCELLED`, `CONFIRMED`, and
-`EXPIRED` customer outcomes while
+After a capture failure, the workflow retrieves provider state before choosing whether to cancel
+the authorization or refund a completed capture. An Inventory commit failure after capture refunds
+Payment, cancels the reversible Fulfillment reservation, and releases Inventory. Stable operation
+IDs and durable outcomes make replay safe, and the Order becomes `CANCELLED` only after all
+required compensation outcomes are confirmed.
+
+The OpenAPI 3.0 contract is versioned `5.0.0` and exposes `COMPENSATING`, `CANCELLED`,
+`CONFIRMED`, and `EXPIRED` customer outcomes while
 continuing to accept the existing v1 submission schema. Reservations carry a five-minute business deadline. The
-workflow releases a reservation that reaches the deadline before commit and exposes the
-Order as `EXPIRED`. A one-minute
+workflow compensates a captured Payment if Inventory can no longer commit. A one-minute
 reconciliation schedule queries the reservation-expiry index and releases abandoned
 reservations idempotently; DynamoDB TTL is assigned only after expiry release and is used
 solely for eventual storage cleanup. The resulting `InventoryReleased` fact independently
@@ -163,12 +167,12 @@ an abandoned reservation, duplicate sweeps, duplicate release delivery, and a re
 commit-versus-expiry race. It uses four uniquely named checkouts and requires
 `CHECKOUT_REQUEST_CEILING` to be at least `4`.
 
-`workload:failure` runs eight deployed scenarios through the immutable workflow alias. It
-asserts Inventory rejection, all deterministic Payment failure effects, ambiguous-result
-reconciliation, Fulfillment-reservation failure, reverse-order compensation, terminal Order
-status, durable operation-ledger results, emitted outbox facts, and bounded state transitions.
+`workload:failure` runs twelve deployed scenarios through the immutable workflow alias. It
+asserts Inventory rejection, deterministic Payment failures, capture reconciliation, post-capture
+Inventory commit failure, reverse-order compensation, replay without duplicate effects, customer
+Order status, durable operation-ledger results, emitted outbox facts, and bounded transitions.
 It writes provider plans only through the narrowly scoped test role and requires
-`CHECKOUT_REQUEST_CEILING` to be at least `8`.
+`CHECKOUT_REQUEST_CEILING` to be at least `12`.
 
 Set `WORKLOAD_PROFILE=production-reference` before `workload:synth` to generate the
 production-reference template without the failure-plan table, role, environment variables,

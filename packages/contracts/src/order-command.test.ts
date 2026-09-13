@@ -9,6 +9,8 @@ import {
   validateMarkOrderConfirmedOutcome,
   validateMarkOrderCancelledCommand,
   validateMarkOrderCancelledOutcome,
+  validateMarkOrderCompensatingCommand,
+  validateMarkOrderCompensatingOutcome,
   validateMarkOrderInventoryUnavailableCommand,
   validateMarkOrderInventoryUnavailableOutcome,
 } from "./generated/order-command.js";
@@ -104,6 +106,23 @@ describe("Order command JSON schemas", () => {
       checkoutId: "checkout-123",
       correlationId: "corr-123",
       status: "CANCELLED",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the customer-visible compensation-in-progress command and outcome", () => {
+    expect(validateMarkOrderCompensatingCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderCompensating",
+      operationId: "compensate-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderCompensatingOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "COMPENSATING",
     }).ok).toBe(true);
   });
 

@@ -11,6 +11,8 @@ import type {
   CreatePendingOrderCommand,
   MarkOrderCancelledCommand,
   MarkOrderCancelledOutcome,
+  MarkOrderCompensatingCommand,
+  MarkOrderCompensatingOutcome,
   MarkOrderConfirmedCommand,
   MarkOrderConfirmedOutcome,
   MarkOrderExpiredCommand,
@@ -19,6 +21,7 @@ import type {
   MarkOrderInventoryUnavailableOutcome,
   OrderExpiredEvent,
   OrderCancelledEvent,
+  OrderCompensatingEvent,
   OrderConfirmedEvent,
   OrderInventoryUnavailableEvent,
   OrderPendingEvent,
@@ -103,7 +106,7 @@ export async function markOrderInventoryUnavailable(
   input: MarkOrderInventoryUnavailableCommand,
   dependencies: OrderRepositoryDependencies = {},
 ): Promise<MarkOrderInventoryUnavailableOutcome> {
-  return markOrderTerminal(
+  return transitionOrder(
     orderTableName,
     outboxTableName,
     input,
@@ -118,7 +121,7 @@ export async function markOrderExpired(
   input: MarkOrderExpiredCommand,
   dependencies: OrderRepositoryDependencies = {},
 ): Promise<MarkOrderExpiredOutcome> {
-  return markOrderTerminal(
+  return transitionOrder(
     orderTableName,
     outboxTableName,
     input,
@@ -133,7 +136,7 @@ export async function markOrderConfirmed(
   input: MarkOrderConfirmedCommand,
   dependencies: OrderRepositoryDependencies = {},
 ): Promise<MarkOrderConfirmedOutcome> {
-  return markOrderTerminal(
+  return transitionOrder(
     orderTableName,
     outboxTableName,
     input,
@@ -148,41 +151,61 @@ export async function markOrderCancelled(
   input: MarkOrderCancelledCommand,
   dependencies: OrderRepositoryDependencies = {},
 ): Promise<MarkOrderCancelledOutcome> {
-  return markOrderTerminal(
+  return transitionOrder(
     orderTableName,
     outboxTableName,
     input,
     "CANCELLED",
     dependencies,
+    "COMPENSATING",
   ) as Promise<MarkOrderCancelledOutcome>;
 }
 
-type TerminalOrderCommand =
+export async function markOrderCompensating(
+  orderTableName: string,
+  outboxTableName: string,
+  input: MarkOrderCompensatingCommand,
+  dependencies: OrderRepositoryDependencies = {},
+): Promise<MarkOrderCompensatingOutcome> {
+  return transitionOrder(
+    orderTableName,
+    outboxTableName,
+    input,
+    "COMPENSATING",
+    dependencies,
+  ) as Promise<MarkOrderCompensatingOutcome>;
+}
+
+type OrderTransitionCommand =
   | MarkOrderInventoryUnavailableCommand
   | MarkOrderExpiredCommand
+  | MarkOrderCompensatingCommand
   | MarkOrderCancelledCommand
   | MarkOrderConfirmedCommand;
-type TerminalOrderOutcome =
+type OrderTransitionOutcome =
   | MarkOrderInventoryUnavailableOutcome
   | MarkOrderExpiredOutcome
+  | MarkOrderCompensatingOutcome
   | MarkOrderCancelledOutcome
   | MarkOrderConfirmedOutcome;
-type TerminalOrderEvent =
+type OrderTransitionEvent =
   | OrderInventoryUnavailableEvent
   | OrderExpiredEvent
+  | OrderCompensatingEvent
   | OrderCancelledEvent
   | OrderConfirmedEvent;
 
-async function markOrderTerminal(
+async function transitionOrder(
   orderTableName: string,
   outboxTableName: string,
-  input: TerminalOrderCommand,
-  status: TerminalOrderOutcome["status"],
+  input: OrderTransitionCommand,
+  status: OrderTransitionOutcome["status"],
   dependencies: OrderRepositoryDependencies,
-): Promise<TerminalOrderOutcome> {
+  requiredStatus = "PENDING",
+): Promise<OrderTransitionOutcome> {
   const now = (dependencies.clock ?? (() => new Date()))();
   const eventId = (dependencies.eventId ?? randomUUID)();
-  const outcome: TerminalOrderOutcome = {
+  const outcome: OrderTransitionOutcome = {
     schemaVersion: "1.0",
     checkoutId: input.checkoutId,
     correlationId: input.correlationId,
@@ -199,7 +222,7 @@ async function markOrderTerminal(
     aggregateType: "Order",
     aggregateId: input.checkoutId,
     payload: { status },
-  } as TerminalOrderEvent;
+  } as OrderTransitionEvent;
   const client = dependencies.client ?? DynamoDBDocumentClient.from(new DynamoDBClient({}), {
     marshallOptions: { removeUndefinedValues: true },
   });
@@ -216,12 +239,12 @@ async function markOrderTerminal(
           Update: {
             TableName: orderTableName,
             Key: { checkoutId: input.checkoutId },
-            UpdateExpression: "SET #status = :terminal, updatedAt = :updatedAt",
-            ConditionExpression: "#status = :pending AND correlationId = :correlationId",
+            UpdateExpression: "SET #status = :targetStatus, updatedAt = :updatedAt",
+            ConditionExpression: "#status = :requiredStatus AND correlationId = :correlationId",
             ExpressionAttributeNames: { "#status": "status" },
             ExpressionAttributeValues: {
-              ":pending": "PENDING",
-              ":terminal": status,
+              ":requiredStatus": requiredStatus,
+              ":targetStatus": status,
               ":correlationId": input.correlationId,
               ":updatedAt": now.toISOString(),
             },
@@ -271,10 +294,11 @@ async function markOrderTerminal(
   }
 }
 
-function orderEventType(status: TerminalOrderOutcome["status"]): TerminalOrderEvent["eventType"] {
+function orderEventType(status: OrderTransitionOutcome["status"]): OrderTransitionEvent["eventType"] {
   switch (status) {
     case "INVENTORY_UNAVAILABLE": return "OrderInventoryUnavailable";
     case "EXPIRED": return "OrderExpired";
+    case "COMPENSATING": return "OrderCompensating";
     case "CANCELLED": return "OrderCancelled";
     case "CONFIRMED": return "OrderConfirmed";
   }
@@ -286,7 +310,7 @@ interface OrderOperation {
   readonly operationId: string;
   readonly payloadHash: string;
   readonly state: "SUCCEEDED";
-  readonly result: TerminalOrderOutcome;
+  readonly result: OrderTransitionOutcome;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -294,7 +318,7 @@ interface OrderOperation {
 function orderOperation(
   operationId: string,
   payloadHash: string,
-  result: TerminalOrderOutcome,
+  result: OrderTransitionOutcome,
   now: string,
 ): OrderOperation {
   return {
@@ -326,7 +350,7 @@ async function recordCompletedOrderOperation(
   client: DynamoDBDocumentClient,
   tableName: string,
   operation: OrderOperation,
-): Promise<TerminalOrderOutcome> {
+): Promise<OrderTransitionOutcome> {
   try {
     await client.send(new PutCommand({
       TableName: tableName,
@@ -345,7 +369,7 @@ async function recordCompletedOrderOperation(
 function recordedOrderOutcome(
   operation: OrderOperation,
   payloadHash: string,
-): TerminalOrderOutcome {
+): OrderTransitionOutcome {
   if (operation.payloadHash !== payloadHash) {
     throw new Error("Order operation ID was reused with a different payload");
   }

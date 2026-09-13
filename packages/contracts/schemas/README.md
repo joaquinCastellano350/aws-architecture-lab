@@ -6,7 +6,7 @@ workspace regenerates TypeScript types and runtime validators; generated files a
 maintained independently.
 
 The contracts currently define versioned Order, Inventory, Payment, and Fulfillment
-commands, outcomes, and committed-fact envelopes. Fulfillment keeps reservation and
-irreversible-handoff contracts independent of the SQS callback envelope. Confirmed pre-capture
-compensation adds an Order cancellation command, outcome, and fact without changing earlier v1
-contracts in place.
+commands, outcomes, and committed-fact envelopes. Fulfillment keeps reservation, cancellation,
+and irreversible-handoff contracts independent of the SQS callback envelope. Compensation adds
+customer-visible Order progress plus immutable Order, Payment, Inventory, and Fulfillment facts
+without rewriting earlier effects.

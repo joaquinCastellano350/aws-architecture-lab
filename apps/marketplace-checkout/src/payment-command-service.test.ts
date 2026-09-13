@@ -15,6 +15,7 @@ import {
 import {
   DeterministicPaymentProvider,
   PaymentProviderResponseLostError,
+  PaymentProviderTransientError,
 } from "./payment-provider.js";
 
 describe("Payment command boundary", () => {
@@ -72,6 +73,31 @@ describe("Payment command boundary", () => {
     ]);
   });
 
+  it("reconciles an ambiguous refund without repeating the economic effect", async () => {
+    const ledger = new MemoryPaymentLedger();
+    const provider = new DeterministicPaymentProvider({
+      failurePlan: { "payment:payment-123:refund": ["AMBIGUOUS_COMPLETION"] },
+    });
+    const payment = service(ledger, provider);
+    await payment.execute(authorizeCommand());
+    await payment.execute(captureCommand());
+
+    await expect(payment.execute(refundCommand())).rejects.toBeInstanceOf(
+      PaymentProviderResponseLostError,
+    );
+    const refunded = await payment.execute(refundCommand());
+    const replay = await payment.execute(refundCommand());
+
+    expect(refunded.status).toBe("REFUNDED");
+    expect(replay).toEqual(refunded);
+    expect(provider.mutationCount("payment:payment-123:refund")).toBe(1);
+    expect(ledger.events.map(({ eventType }) => eventType)).toEqual([
+      "PaymentAuthorized",
+      "PaymentCaptured",
+      "PaymentRefunded",
+    ]);
+  });
+
   it("returns the committed result when an ambiguous capture itself is replayed", async () => {
     const ledger = new MemoryPaymentLedger();
     const provider = new DeterministicPaymentProvider({
@@ -87,6 +113,35 @@ describe("Payment command boundary", () => {
       expect.objectContaining({ status: "CAPTURED" }),
     );
     expect(provider.mutationCount("payment:payment-123:capture")).toBe(1);
+  });
+
+  it("reconciles a failed capture as still authorized before cancellation", async () => {
+    const ledger = new MemoryPaymentLedger();
+    const provider = new DeterministicPaymentProvider({
+      failurePlan: { "payment:payment-123:capture": ["FAIL_BEFORE_MUTATION"] },
+    });
+    const payment = service(ledger, provider);
+    await payment.execute(authorizeCommand());
+
+    await expect(payment.execute(captureCommand())).rejects.toBeInstanceOf(
+      PaymentProviderTransientError,
+    );
+    await expect(payment.execute(retrieveCommand())).resolves.toEqual(
+      expect.objectContaining({ status: "AUTHORIZED" }),
+    );
+    await expect(payment.execute(cancelCommand())).resolves.toEqual(
+      expect.objectContaining({ status: "CANCELLED" }),
+    );
+
+    expect(ledger.operation("capture-checkout-123")).toEqual(expect.objectContaining({
+      state: "FAILED",
+      result: expect.objectContaining({
+        status: "REJECTED",
+        rejectionCode: "CAPTURE_NOT_APPLIED",
+      }),
+    }));
+    expect(provider.mutationCount("payment:payment-123:capture")).toBe(0);
+    expect(provider.mutationCount("payment:payment-123:cancel")).toBe(1);
   });
 
   it("returns stable rejection and retrieval outcomes", async () => {
@@ -164,6 +219,18 @@ function refundCommand(): PaymentCommand {
     checkoutId: "checkout-123",
     paymentId: "payment-123",
     amountMinor: 1250,
+    correlationId: "correlation-123",
+    causationId: "execution-123",
+  };
+}
+
+function cancelCommand(): PaymentCommand {
+  return {
+    schemaVersion: "1.0",
+    commandType: "CancelPayment",
+    operationId: "cancel-checkout-123",
+    checkoutId: "checkout-123",
+    paymentId: "payment-123",
     correlationId: "correlation-123",
     causationId: "execution-123",
   };
