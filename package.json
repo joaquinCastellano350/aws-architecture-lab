@@ -22,6 +22,7 @@
     "workload:replay": "npm run replay:workload --workspace @aws-architecture-lab/infra --",
     "workload:smoke": "npm run smoke:workload --workspace @aws-architecture-lab/infra",
     "workload:synth": "npm run synth:workload --workspace @aws-architecture-lab/infra",
+    "workload:version": "npm run version:workload --workspace @aws-architecture-lab/infra",
     "test": "npm run test --workspaces --if-present",
     "test:stripe": "npm run test:stripe --workspace @aws-architecture-lab/marketplace-checkout",
     "typecheck": "npm run typecheck --workspaces --if-present",

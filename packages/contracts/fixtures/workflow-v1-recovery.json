@@ -1,0 +1,113 @@
+{
+  "fixtureVersion": "workflow-v1",
+  "markOrderCompensating": {
+    "schemaVersion": "1.0",
+    "commandType": "MarkOrderCompensating",
+    "operationId": "compensate-order-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "markOrderInventoryUnavailable": {
+    "schemaVersion": "1.0",
+    "commandType": "MarkOrderInventoryUnavailable",
+    "operationId": "mark-inventory-unavailable-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "cancelPayment": {
+    "schemaVersion": "1.0",
+    "commandType": "CancelPayment",
+    "operationId": "cancel-payment-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "paymentId": "payment-checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "refundPayment": {
+    "schemaVersion": "1.0",
+    "commandType": "RefundPayment",
+    "operationId": "refund-payment-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "paymentId": "payment-checkout-from-workflow-v1",
+    "amountMinor": 1000,
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "retrievePayment": {
+    "schemaVersion": "1.0",
+    "commandType": "RetrievePayment",
+    "operationId": "retrieve-payment-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "paymentId": "payment-checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "cancelFulfillment": {
+    "schemaVersion": "1.0",
+    "commandType": "CancelFulfillment",
+    "operationId": "cancel-fulfillment-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "reservationId": "fulfillment-checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "retrieveFulfillment": {
+    "schemaVersion": "1.0",
+    "commandType": "RetrieveFulfillment",
+    "operationId": "retrieve-fulfillment-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "reservationId": "fulfillment-checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "releaseInventory": {
+    "schemaVersion": "1.0",
+    "commandType": "ReleaseInventory",
+    "operationId": "release-inventory-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "reservationId": "reservation-checkout-from-workflow-v1",
+    "releaseReason": "COMPENSATION",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "markOrderCancelled": {
+    "schemaVersion": "1.0",
+    "commandType": "MarkOrderCancelled",
+    "operationId": "cancel-order-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "markOrderReconciliationRequired": {
+    "schemaVersion": "1.0",
+    "commandType": "MarkOrderReconciliationRequired",
+    "operationId": "mark-reconciliation-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "createReconciliation": {
+    "schemaVersion": "1.0",
+    "commandType": "CreateReconciliation",
+    "operationId": "reconcile-checkout-from-workflow-v1",
+    "reconciliationId": "reconciliation-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1",
+    "workflowVersionArn": "arn:aws:states:us-east-1:123456789012:stateMachine:checkout:1",
+    "failedInvariant": "CAPTURED_PAYMENT_MUST_BE_REFUNDED",
+    "requiredAction": "COMPENSATE_CAPTURED_PAYMENT",
+    "attempts": 3
+  },
+  "resolveReconciliation": {
+    "schemaVersion": "1.0",
+    "commandType": "ResolveReconciliation",
+    "operationId": "resolve-reconciliation-checkout-from-workflow-v1",
+    "reconciliationId": "reconciliation-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "replay-execution-from-workflow-v1"
+  }
+}

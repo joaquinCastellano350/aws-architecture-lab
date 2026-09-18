@@ -19,7 +19,8 @@
     "synth": "npm run build && cdk synth",
     "synth:foundation": "npm run build && node dist/bin/synth-foundation.js",
     "synth:workload": "npm run build && node dist/bin/synth-workload.js",
-    "verify:foundation": "npm run build && node dist/bin/verify-foundation.js"
+    "verify:foundation": "npm run build && node dist/bin/verify-foundation.js",
+    "version:workload": "npm run build && node dist/bin/version-workload.js"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "5.2.0",

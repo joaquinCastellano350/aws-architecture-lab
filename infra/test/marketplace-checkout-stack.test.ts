@@ -506,6 +506,15 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     expect(policies).toContain("states:DescribeExecution");
     expect(policies).toContain("lambda:InvokeFunction");
     expect(policies).toContain(":*");
+
+    const definition = JSON.stringify(
+      Object.values(template.findResources("AWS::StepFunctions::StateMachine"))[0]?.Properties,
+    );
+    expect(definition).toContain("VersionDeploymentProbe");
+    expect(definition).toContain("versionDeploymentProbe.resumeAt");
+    expect(definition).toContain("VersionDeploymentCompatibilityProbe");
+    expect(definition).toContain("RetrievePayment");
+    expect(definition).toContain("VersionDeploymentProbeSucceeded");
   });
 
   it("coordinates Inventory only through typed commands and branches on business outcomes", () => {
@@ -621,11 +630,11 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     );
     expect(stateMachineLogicalIds).toHaveLength(1);
 
-    const startExecutionStatements = Object.values(template.findResources("AWS::IAM::Policy"))
+    const allStartExecutionStatements = Object.values(template.findResources("AWS::IAM::Policy"))
       .flatMap((policy) => policy.Properties?.PolicyDocument?.Statement ?? [])
-      .filter((statement) =>
-        statement.Action === "states:StartExecution" && statement.Condition !== undefined
-      );
+      .filter((statement) => statement.Action === "states:StartExecution");
+    const startExecutionStatements = allStartExecutionStatements
+      .filter((statement) => statement.Condition !== undefined);
 
     expect(startExecutionStatements).toEqual([
       {
@@ -639,6 +648,14 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
         },
       },
     ]);
+    const replayStart = allStartExecutionStatements.find(
+      (statement) => statement.Condition === undefined,
+    );
+    expect(replayStart).toBeDefined();
+    expect(replayStart?.Resource).not.toEqual(
+      expect.arrayContaining([{ Ref: stateMachineLogicalIds[0] }]),
+    );
+    expect(JSON.stringify(replayStart?.Resource)).toContain(":*");
   });
 
   it("uses short-lived logs and bounded API capacity without reserving Lambda capacity by default", () => {

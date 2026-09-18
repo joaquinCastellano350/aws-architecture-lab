@@ -1673,7 +1673,43 @@ export class MarketplaceCheckoutStack extends Stack {
         cause: "Reconciliation requested an unsupported recovery action.",
         error: "ReconciliationInvariantViolation",
       }));
+    const versionDeploymentCompatibilityProbe = new LambdaInvoke(
+      this,
+      "VersionDeploymentCompatibilityProbe",
+      {
+        lambdaFunction: paymentFunctionVersion as IFunction,
+        payload: TaskInput.fromObject({
+          schemaVersion: "1.0",
+          commandType: "RetrievePayment",
+          operationId: JsonPath.format(
+            "version-probe-{}",
+            JsonPath.stringAt("$.versionDeploymentProbe.probeId"),
+          ),
+          checkoutId: JsonPath.stringAt("$.versionDeploymentProbe.checkoutId"),
+          paymentId: JsonPath.stringAt("$.versionDeploymentProbe.paymentId"),
+          correlationId: JsonPath.stringAt("$.versionDeploymentProbe.correlationId"),
+          causationId: JsonPath.stringAt("$$.Execution.Id"),
+        }),
+        payloadResponseOnly: true,
+        resultPath: "$.versionDeploymentProbe.payment",
+        retryOnServiceExceptions: false,
+      },
+    );
+    this.addPaymentCommandRetry(versionDeploymentCompatibilityProbe);
+    const versionDeploymentProbeOutcome = new Choice(this, "VersionDeploymentProbeOutcome")
+      .when(
+        Condition.stringEquals("$.versionDeploymentProbe.payment.status", "NOT_FOUND"),
+        new Succeed(this, "VersionDeploymentProbeSucceeded"),
+      )
+      .otherwise(new Fail(this, "VersionDeploymentProbeFailed", {
+        cause: "The pinned Payment handler returned an unexpected compatibility outcome.",
+        error: "VersionDeploymentProbeFailure",
+      }));
+    const versionDeploymentProbe = new Wait(this, "VersionDeploymentProbe", {
+      time: WaitTime.timestampPath("$.versionDeploymentProbe.resumeAt"),
+    }).next(versionDeploymentCompatibilityProbe.next(versionDeploymentProbeOutcome));
     const workflowDefinition = new Choice(this, "WorkflowEntry")
+      .when(Condition.isPresent("$.versionDeploymentProbe"), versionDeploymentProbe)
       .when(Condition.isPresent("$.reconciliationReplay"), reconciliationReplayRoute)
       .otherwise(createPendingOrder.next(reserveInventory));
     const stateMachine = new StateMachine(this, "CheckoutWorkflow", {
@@ -1719,7 +1755,7 @@ export class MarketplaceCheckoutStack extends Stack {
     );
     reconciliationReplay.addToRolePolicy(new PolicyStatement({
       actions: ["states:StartExecution"],
-      resources: [stateMachine.stateMachineArn, `${stateMachine.stateMachineArn}:*`],
+      resources: [`${stateMachine.stateMachineArn}:*`],
     }));
 
     const workflowVersion = new CfnStateMachineVersion(this, "CheckoutWorkflowVersion", {

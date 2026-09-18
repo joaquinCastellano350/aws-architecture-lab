@@ -173,6 +173,7 @@ npm run workload:smoke
 npm run workload:expiry
 npm run workload:failure
 npm run workload:replay -- --operation-id <unique-id> --reconciliation-id <id> --requested-by <operator> --reason <reason>
+npm run workload:version
 npm run workload:destroy
 ```
 
@@ -196,6 +197,17 @@ Inventory commit failure, reverse-order compensation, replay without duplicate e
 Order status, exhausted refund and Inventory-release reconciliation, rejected Fulfillment
 cancellation, audited replay and eventual resolution, durable operation-ledger results, emitted
 outbox facts, and bounded transitions.
+
+`workload:version` publishes a harmless new immutable revision, moves `LIVE` forward, and
+admits a Checkout whose Saga record identifies that version. While an isolated probe remains
+active on the old version, the command rolls `LIVE` back and proves that only the next Checkout
+uses the old version; the already-admitted Checkout remains associated with the new version.
+It then points `LIVE` forward again, aborts and redrives the probe, and verifies that AWS keeps
+the same execution ARN and original workflow version while the pinned Payment handler accepts
+a read-only v1 retrieval command. Cleanup restores the original mutable
+definition and leaves `LIVE` rolled back; both immutable versions remain available for active
+work and later redrives. This command changes deployed alias routing while it runs and should
+not be run concurrently with a deployment.
 
 The Stripe adapter contract is intentionally small and must not be used as a load test. With
 AWS credentials for the sandbox account configured and the foundation secret populated, run:

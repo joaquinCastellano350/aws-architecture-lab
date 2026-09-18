@@ -1,10 +1,10 @@
 # Marketplace Checkout Saga
 
-The current increment makes failed compensation and irreversible outcomes explicit. Recovery
-exposes `COMPENSATING`, records refund and cancellation as facts with stable operation IDs, and
-exposes `CANCELLED` only after every required compensation is confirmed. Exhausted work moves
-both Order and Saga to `RECONCILIATION_REQUIRED`; after the Fulfillment pivot, recovery moves
-forward and never invents cancellation.
+The current increment makes workflow evolution executable evidence. Every deployment publishes
+an immutable Step Functions version behind `LIVE`, records the selected version on the Saga,
+retains the workflow and handler versions needed by active work, and keeps v1 workflow-command
+fixtures accepted by current handlers. A bounded probe path has no domain side effects and exists
+only to prove active-execution and redrive pinning during the deployed version exercise.
 
 1. An IAM-authenticated caller submits the OpenAPI-defined checkout request with a client
    idempotency key.
@@ -122,6 +122,16 @@ Replaced workflow and handler versions are retained across updates.
 Deleting each unqualified parent resource during ephemeral teardown deletes its associated
 versions as well. Step Functions logging excludes execution data, and API payload logging
 is disabled.
+
+The deployed `workload:version` evidence command starts a side-effect-free active probe through
+`LIVE`, publishes a new revision, and admits a real Checkout through the asynchronous API. It
+proves the old execution remains pinned while the new Saga records the new version. Manual
+rollback then changes only the next Checkout's admission: the prior Saga keeps its recorded new
+version and no domain effect is described as reversed. Finally, the command redrives the aborted
+old probe while `LIVE` points forward and verifies the same execution ARN still uses the original
+definition and completes through its pinned Payment handler with a read-only v1 retrieval command.
+Cleanup restores the mutable definition and original `LIVE` route without deleting
+either immutable version.
 
 The deployed `workload:expiry` evidence command exercises the workflow deadline, abandoned
 reservation recovery, duplicate sweeps and releases, and the real DynamoDB race between

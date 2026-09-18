@@ -1,0 +1,77 @@
+{
+  "fixtureVersion": "workflow-v1",
+  "createPendingOrder": {
+    "schemaVersion": "1.0",
+    "checkoutId": "checkout-from-workflow-v1",
+    "cartId": "cart-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "reserveInventory": {
+    "schemaVersion": "1.0",
+    "commandType": "ReserveInventory",
+    "operationId": "reserve-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "reservationId": "reservation-checkout-from-workflow-v1",
+    "itemId": "item-from-workflow-v1",
+    "quantity": 1,
+    "expiresAt": "2026-09-18T15:05:00.000Z",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "authorizePayment": {
+    "schemaVersion": "1.0",
+    "commandType": "AuthorizePayment",
+    "operationId": "authorize-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "paymentId": "payment-checkout-from-workflow-v1",
+    "amountMinor": 1000,
+    "currency": "USD",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "reserveFulfillment": {
+    "schemaVersion": "1.0",
+    "commandType": "ReserveFulfillment",
+    "operationId": "reserve-fulfillment-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "reservationId": "fulfillment-checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "capturePayment": {
+    "schemaVersion": "1.0",
+    "commandType": "CapturePayment",
+    "operationId": "capture-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "paymentId": "payment-checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "commitInventory": {
+    "schemaVersion": "1.0",
+    "commandType": "CommitInventory",
+    "operationId": "commit-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "reservationId": "reservation-checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "handoffFulfillment": {
+    "schemaVersion": "1.0",
+    "commandType": "HandoffFulfillment",
+    "operationId": "handoff-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "reservationId": "fulfillment-checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  },
+  "markOrderConfirmed": {
+    "schemaVersion": "1.0",
+    "commandType": "MarkOrderConfirmed",
+    "operationId": "confirm-checkout-from-workflow-v1",
+    "checkoutId": "checkout-from-workflow-v1",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1"
+  }
+}
