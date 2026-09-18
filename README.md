@@ -44,6 +44,19 @@ $env:CHECKOUT_REQUEST_CEILING = "20" # hard maximum: 9000
 $env:BUDGET_NOTIFICATION_EMAIL = "owner@example.com"
 ```
 
+Stripe Sandbox mode also requires a Stripe Event Destination for Amazon EventBridge. Associate
+the Stripe partner event source with an EventBridge bus in `us-east-1`, subscribe it to
+`payment_intent.*` and `refund.*`, and provide the resulting partner bus name:
+
+```powershell
+$env:PAYMENT_PROVIDER_MODE = "stripe-sandbox"
+$env:STRIPE_EVENT_BUS_NAME = "aws.partner/stripe.com/ed_test_..."
+```
+
+Only the partner bus name is passed to CloudFormation. The Stripe API key remains in the
+foundation secret and is fetched by the Payment Lambdas at runtime. The runtime rejects keys
+that do not begin with `sk_test_`.
+
 `LAMBDA_RESERVED_CONCURRENCY` is optional and applies to each marketplace-checkout Lambda.
 Leave it unset when the account has no reservable concurrency, such as a new account with a
 total concurrency quota of 10. Accounts with sufficient quota can opt in with a value from 1
@@ -183,6 +196,18 @@ Inventory commit failure, reverse-order compensation, replay without duplicate e
 Order status, exhausted refund and Inventory-release reconciliation, rejected Fulfillment
 cancellation, audited replay and eventual resolution, durable operation-ledger results, emitted
 outbox facts, and bounded transitions.
+
+The Stripe adapter contract is intentionally small and must not be used as a load test. With
+AWS credentials for the sandbox account configured and the foundation secret populated, run:
+
+```powershell
+$env:RUN_STRIPE_SANDBOX_TESTS = "true"
+npm run test:stripe
+```
+
+The suite uses Stripe test Payment Methods and proves manual authorization, stable idempotent
+replay, retrieval, capture, cancellation before capture, refund after capture, and business
+rejection. Normal load and failure evidence continues to use `PAYMENT_PROVIDER_MODE=fake`.
 It writes provider plans only through the narrowly scoped test role and requires
 `CHECKOUT_REQUEST_CEILING` to be at least `14`.
 

@@ -61,6 +61,13 @@ describe("sandbox deployment preflight", () => {
     );
   });
 
+  it("requires an EventBridge partner bus for Stripe Sandbox", () => {
+    expect(() => runPreflight(
+      validEnvironment({ PAYMENT_PROVIDER_MODE: "stripe-sandbox" }),
+      validDependencies(),
+    )).toThrow("STRIPE_EVENT_BUS_NAME is required for stripe-sandbox");
+  });
+
   it("rejects an absent request ceiling", () => {
     expect(() =>
       runPreflight(validEnvironment({ CHECKOUT_REQUEST_CEILING: undefined }), validDependencies()),

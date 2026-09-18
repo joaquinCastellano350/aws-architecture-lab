@@ -42,8 +42,10 @@ import {
 import { CfnVersion, Runtime, StartingPosition, type IFunction } from "aws-cdk-lib/aws-lambda";
 import { DynamoEventSource, SqsDlq, SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
+import { SqsDestination } from "aws-cdk-lib/aws-lambda-destinations";
 import { FilterPattern, LogGroup, MetricFilter, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { Queue, QueueEncryption } from "aws-cdk-lib/aws-sqs";
+import { Secret } from "aws-cdk-lib/aws-secretsmanager";
 import {
   CfnStateMachineAlias,
   CfnStateMachineVersion,
@@ -75,6 +77,8 @@ import {
 } from "@aws-architecture-lab/contracts";
 import type { Construct } from "constructs";
 
+import { STRIPE_SANDBOX_SECRET_NAME } from "./foundation-config.js";
+
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const orderEventSource = "aws-architecture-lab.order";
 const orderPendingEventType = "OrderPending";
@@ -104,6 +108,8 @@ const paymentCommandTransientErrors = [
 export interface MarketplaceCheckoutStackProps extends StackProps {
   readonly enableFakePaymentFailurePlans?: boolean;
   readonly lambdaReservedConcurrency?: number;
+  readonly paymentProviderMode?: "fake" | "stripe-sandbox";
+  readonly stripeEventBusName?: string;
 }
 
 export class MarketplaceCheckoutStack extends Stack {
@@ -113,6 +119,8 @@ export class MarketplaceCheckoutStack extends Stack {
     const {
       enableFakePaymentFailurePlans = true,
       lambdaReservedConcurrency,
+      paymentProviderMode = "fake",
+      stripeEventBusName,
       ...stackProps
     } = props;
     super(scope, id, stackProps);
@@ -126,6 +134,9 @@ export class MarketplaceCheckoutStack extends Stack {
       throw new Error("lambdaReservedConcurrency must be an integer from 1 through 10 when set.");
     }
     this.lambdaReservedConcurrency = lambdaReservedConcurrency;
+    if (paymentProviderMode === "stripe-sandbox" && stripeEventBusName === undefined) {
+      throw new Error("stripeEventBusName is required when paymentProviderMode is stripe-sandbox.");
+    }
 
     Tags.of(this).add("project", "aws-architecture-lab");
     Tags.of(this).add("environment", "sandbox");
@@ -475,6 +486,7 @@ export class MarketplaceCheckoutStack extends Stack {
           ? {}
           : { FAKE_PAYMENT_FAILURE_PLAN_TABLE_NAME: fakePaymentFailurePlanTable.tableName }),
         PAYMENT_OUTBOX_TABLE_NAME: paymentOutboxTable.tableName,
+        PAYMENT_PROVIDER_MODE: paymentProviderMode,
         PAYMENT_TABLE_NAME: paymentTable.tableName,
       },
       Duration.seconds(10),
@@ -491,9 +503,85 @@ export class MarketplaceCheckoutStack extends Stack {
         fakePaymentProviderTable.tableArn,
       ],
     }));
+    if (paymentProviderMode === "stripe-sandbox") {
+      Secret.fromSecretNameV2(
+        this,
+        "StripeSandboxSecret",
+        STRIPE_SANDBOX_SECRET_NAME,
+      ).grantRead(paymentFunction);
+    }
     const paymentFunctionVersion = paymentFunction.currentVersion;
     const cfnPaymentFunctionVersion = paymentFunctionVersion.node.defaultChild as CfnVersion;
     retainAcrossDeployments(cfnPaymentFunctionVersion);
+
+    if (paymentProviderMode === "stripe-sandbox" && stripeEventBusName !== undefined) {
+      const stripeEvents = EventBus.fromEventBusName(
+        this,
+        "StripePartnerEvents",
+        stripeEventBusName,
+      );
+      const failedStripeEvents = new Queue(this, "StripeEventReconciliationDeadLetterQueue", {
+        encryption: QueueEncryption.SQS_MANAGED,
+        retentionPeriod: Duration.days(4),
+        removalPolicy: RemovalPolicy.DESTROY,
+      });
+      const stripeEventReconciler = this.lambdaFunction(
+        "StripeEventReconciler",
+        "stripe-event-lambda.ts",
+        {
+          PAYMENT_OUTBOX_TABLE_NAME: paymentOutboxTable.tableName,
+          PAYMENT_PROVIDER_MODE: paymentProviderMode,
+          PAYMENT_TABLE_NAME: paymentTable.tableName,
+        },
+        Duration.seconds(10),
+      );
+      paymentTable.grantReadWriteData(stripeEventReconciler);
+      paymentOutboxTable.grantWriteData(stripeEventReconciler);
+      stripeEventReconciler.addToRolePolicy(new PolicyStatement({
+        actions: ["dynamodb:TransactWriteItems"],
+        resources: [paymentTable.tableArn, paymentOutboxTable.tableArn],
+      }));
+      Secret.fromSecretNameV2(
+        this,
+        "StripeEventReconcilerSecret",
+        STRIPE_SANDBOX_SECRET_NAME,
+      ).grantRead(stripeEventReconciler);
+      stripeEventReconciler.configureAsyncInvoke({
+        maxEventAge: Duration.minutes(5),
+        onFailure: new SqsDestination(failedStripeEvents),
+        retryAttempts: 2,
+      });
+      new Rule(this, "StripeProviderEventRule", {
+        eventBus: stripeEvents,
+        eventPattern: {
+          detail: {
+            type: [{ prefix: "payment_intent." }, { prefix: "refund." }],
+          },
+        },
+        targets: [new EventBridgeLambdaFunction(stripeEventReconciler, {
+          deadLetterQueue: failedStripeEvents,
+          maxEventAge: Duration.minutes(5),
+          retryAttempts: 2,
+        })],
+      });
+      const divergenceMetric = new MetricFilter(this, "ProviderDivergenceMetric", {
+        logGroup: stripeEventReconciler.logGroup,
+        filterPattern: FilterPattern.literal('{ $.eventType = "ProviderDivergence" }'),
+        metricNamespace: "AWSArchitectureLab/MarketplaceCheckout",
+        metricName: "ProviderDivergence",
+        metricValue: "1",
+        defaultValue: 0,
+      });
+      new Alarm(this, "ProviderDivergenceAlarm", {
+        alarmName: "aws-architecture-lab-marketplace-checkout-provider-divergence",
+        alarmDescription: "Action required: investigate Stripe provider divergence.",
+        metric: divergenceMetric.metric({ period: Duration.minutes(1) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: TreatMissingData.NOT_BREACHING,
+      });
+    }
 
     const fulfillmentFunction = this.lambdaFunction(
       "FulfillmentCommand",

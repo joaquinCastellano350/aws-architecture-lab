@@ -47,6 +47,7 @@ export function runPreflight(
       `PAYMENT_PROVIDER_MODE must be fake or stripe-sandbox; received ${providerMode || "no value"}.`,
     );
   }
+  if (providerMode === "stripe-sandbox") requiredStripeEventBusName(environment);
 
   const requestCeiling = Number(environment.CHECKOUT_REQUEST_CEILING);
   if (!Number.isInteger(requestCeiling) || requestCeiling < 1 || requestCeiling > 9000) {
@@ -69,3 +70,4 @@ export function runPreflight(
     requestCeiling,
   };
 }
+import { requiredStripeEventBusName } from "./stripe-configuration.js";

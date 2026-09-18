@@ -60,6 +60,17 @@ export interface PaymentOperationRecord {
   readonly updatedAt: string;
 }
 
+export interface PaymentRecord {
+  readonly recordKey: string;
+  readonly recordType: "PAYMENT";
+  readonly paymentId: string;
+  readonly checkoutId: string;
+  readonly status?: PaymentCommandOutcome["status"];
+  readonly activeOperationId?: string;
+  readonly providerReference?: string;
+  readonly updatedAt: string;
+}
+
 export interface PaymentOperationCompletion {
   readonly operationId: string;
   readonly payloadHash: string;
@@ -72,6 +83,7 @@ export interface PaymentOperationCompletion {
 
 export interface PaymentLedger {
   findOperation(operationId: string): Promise<PaymentOperationRecord | undefined>;
+  findPayment(paymentId: string): Promise<PaymentRecord | undefined>;
   findActiveOperation(paymentId: string): Promise<PaymentOperationRecord | undefined>;
   begin(operation: PaymentOperationRecord): Promise<PaymentOperationRecord>;
   complete(completion: PaymentOperationCompletion): Promise<PaymentCommandOutcome>;
@@ -83,6 +95,9 @@ export interface PaymentCommandServiceDependencies {
   readonly clock?: () => Date;
   readonly eventId?: () => string;
 }
+
+export type ProviderReconciliationResult = "CONSISTENT" | "REPAIRED" | "DIVERGED";
+type ProviderStateClassification = "EXPECTED" | "NOT_APPLIED" | "DIVERGED";
 
 export class PaymentCommandService {
   readonly #clock: () => Date;
@@ -118,6 +133,7 @@ export class PaymentCommandService {
       }
     }
 
+    const payment = await this.#ledger.findPayment(command.paymentId);
     const now = this.#clock().toISOString();
     const proposed: PaymentOperationRecord = {
       recordKey: operationKey(command.operationId),
@@ -131,6 +147,9 @@ export class PaymentCommandService {
       causationId: command.causationId,
       payloadHash,
       state: "IN_PROGRESS",
+      ...(payment?.providerReference === undefined
+        ? {}
+        : { providerReference: payment.providerReference }),
       createdAt: now,
       updatedAt: now,
     };
@@ -141,6 +160,55 @@ export class PaymentCommandService {
       return outcome(command, "RECONCILIATION_REQUIRED");
     }
     return this.#invoke(command, started);
+  }
+
+  public async reconcileProviderState(
+    paymentId: string,
+    retrieved: Awaited<ReturnType<PaymentProvider["retrieve"]>>,
+  ): Promise<ProviderReconciliationResult> {
+    return this.#reconcileProviderState(paymentId, retrieved, false);
+  }
+
+  async #reconcileProviderState(
+    paymentId: string,
+    retrieved: Awaited<ReturnType<PaymentProvider["retrieve"]>>,
+    settleNotApplied: boolean,
+  ): Promise<ProviderReconciliationResult> {
+    const active = await this.#ledger.findActiveOperation(paymentId);
+    if (active !== undefined) {
+      const classification = classifyProviderState(active, retrieved);
+      if (classification === "EXPECTED" && retrieved.kind === "FOUND") {
+        await this.#recordProviderResult(active, {
+          kind: "APPLIED",
+          providerReference: retrieved.providerReference,
+          status: retrieved.status,
+        });
+        return "REPAIRED";
+      }
+      if (classification === "NOT_APPLIED") {
+        if (!settleNotApplied) return "CONSISTENT";
+        await this.#ledger.complete({
+          operationId: active.operationId,
+          payloadHash: active.payloadHash,
+          state: "FAILED",
+          result: outcome(active, "REJECTED", undefined, notAppliedCode(active.commandType)),
+          updatedAt: this.#clock().toISOString(),
+        });
+        return "REPAIRED";
+      }
+      return "DIVERGED";
+    }
+
+    const payment = await this.#ledger.findPayment(paymentId);
+    if (retrieved.kind === "NOT_FOUND") {
+      return payment?.status === undefined || payment.status === "REJECTED"
+        ? "CONSISTENT"
+        : "DIVERGED";
+    }
+    return payment?.status === retrieved.status &&
+      payment.providerReference === retrieved.providerReference
+      ? "CONSISTENT"
+      : "DIVERGED";
   }
 
   async #invoke(
@@ -161,12 +229,18 @@ export class PaymentCommandService {
         providerResult = await this.#provider.capture({
           operationKey: operation.semanticKey,
           paymentId: command.paymentId,
+          ...(operation.providerReference === undefined
+            ? {}
+            : { providerReference: operation.providerReference }),
         });
         break;
       case "CancelPayment":
         providerResult = await this.#provider.cancel({
           operationKey: operation.semanticKey,
           paymentId: command.paymentId,
+          ...(operation.providerReference === undefined
+            ? {}
+            : { providerReference: operation.providerReference }),
         });
         break;
       case "RefundPayment":
@@ -174,6 +248,9 @@ export class PaymentCommandService {
           operationKey: operation.semanticKey,
           paymentId: command.paymentId,
           amountMinor: command.amountMinor,
+          ...(operation.providerReference === undefined
+            ? {}
+            : { providerReference: operation.providerReference }),
         });
         break;
     }
@@ -217,9 +294,14 @@ export class PaymentCommandService {
     operation: PaymentOperationRecord,
     retry?: PaymentMutationCommand,
   ): Promise<PaymentCommandOutcome | undefined> {
-    const retrieved = await this.#provider.retrieve({ paymentId: operation.paymentId });
-    const expected = expectedStatus(operation.commandType);
-    if (retrieved.kind === "FOUND" && retrieved.status === expected) {
+    const retrieved = await this.#provider.retrieve({
+      paymentId: operation.paymentId,
+      ...(operation.providerReference === undefined
+        ? {}
+        : { providerReference: operation.providerReference }),
+    });
+    const classification = classifyProviderState(operation, retrieved);
+    if (classification === "EXPECTED" && retrieved.kind === "FOUND") {
       return this.#recordProviderResult(operation, {
         kind: "APPLIED",
         providerReference: retrieved.providerReference,
@@ -228,8 +310,7 @@ export class PaymentCommandService {
     }
     if (
       retry?.operationId === operation.operationId &&
-      ((retrieved.kind === "NOT_FOUND" && operation.commandType === "AuthorizePayment") ||
-        (retrieved.kind === "FOUND" && retrieved.status === prerequisiteStatus(operation.commandType)))
+      classification === "NOT_APPLIED"
     ) {
       return undefined;
     }
@@ -239,37 +320,19 @@ export class PaymentCommandService {
   async #retrieve(
     command: Extract<PaymentCommand, { readonly commandType: "RetrievePayment" }>,
   ): Promise<PaymentCommandOutcome> {
-    const retrieved = await this.#provider.retrieve({ paymentId: command.paymentId });
-    const active = await this.#ledger.findActiveOperation(command.paymentId);
-    if (active !== undefined) {
-      const expected = expectedStatus(active.commandType);
-      if (retrieved.kind === "FOUND" && retrieved.status === expected) {
-        await this.#recordProviderResult(active, {
-          kind: "APPLIED",
-          providerReference: retrieved.providerReference,
-          status: retrieved.status,
-        });
-      } else if (
-        (retrieved.kind === "NOT_FOUND" && active.commandType === "AuthorizePayment") ||
-        (retrieved.kind === "FOUND" &&
-          retrieved.status === prerequisiteStatus(active.commandType))
-      ) {
-        await this.#ledger.complete({
-          operationId: active.operationId,
-          payloadHash: active.payloadHash,
-          state: "FAILED",
-          result: outcome(
-            active,
-            "REJECTED",
-            undefined,
-            notAppliedCode(active.commandType),
-          ),
-          updatedAt: this.#clock().toISOString(),
-        });
-      } else {
-        return outcome(command, "RECONCILIATION_REQUIRED");
-      }
-    }
+    const payment = await this.#ledger.findPayment(command.paymentId);
+    const retrieved = await this.#provider.retrieve({
+      paymentId: command.paymentId,
+      ...(payment?.providerReference === undefined
+        ? {}
+        : { providerReference: payment.providerReference }),
+    });
+    const reconciliation = await this.#reconcileProviderState(
+      command.paymentId,
+      retrieved,
+      true,
+    );
+    if (reconciliation === "DIVERGED") return outcome(command, "RECONCILIATION_REQUIRED");
     return retrieved.kind === "NOT_FOUND"
       ? outcome(command, "NOT_FOUND")
       : outcome(command, retrieved.status, retrieved.providerReference);
@@ -293,6 +356,26 @@ function prerequisiteStatus(
   commandType: PaymentMutationCommandType,
 ): PaymentProviderStatus | undefined {
   return PAYMENT_MUTATION_METADATA[commandType].prerequisiteStatus;
+}
+
+function classifyProviderState(
+  operation: Pick<PaymentOperationRecord, "commandType">,
+  retrieved: Awaited<ReturnType<PaymentProvider["retrieve"]>>,
+): ProviderStateClassification {
+  if (
+    retrieved.kind === "FOUND" &&
+    retrieved.status === expectedStatus(operation.commandType)
+  ) {
+    return "EXPECTED";
+  }
+  if (
+    (retrieved.kind === "NOT_FOUND" && operation.commandType === "AuthorizePayment") ||
+    (retrieved.kind === "FOUND" &&
+      retrieved.status === prerequisiteStatus(operation.commandType))
+  ) {
+    return "NOT_APPLIED";
+  }
+  return "DIVERGED";
 }
 
 function outcome(

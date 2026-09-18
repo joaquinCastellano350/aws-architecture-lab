@@ -18,6 +18,21 @@ describe("marketplace checkout configuration", () => {
       .toEqual({ enableFakePaymentFailurePlans: false });
   });
 
+  it("configures Stripe Sandbox only with its EventBridge partner bus", () => {
+    expect(marketplaceCheckoutConfiguration({
+      PAYMENT_PROVIDER_MODE: "stripe-sandbox",
+      STRIPE_EVENT_BUS_NAME: "aws.partner/stripe.com/ed_test_123",
+    })).toEqual({
+      paymentProviderMode: "stripe-sandbox",
+      stripeEventBusName: "aws.partner/stripe.com/ed_test_123",
+    });
+  });
+
+  it("rejects Stripe Sandbox without its EventBridge partner bus", () => {
+    expect(() => marketplaceCheckoutConfiguration({ PAYMENT_PROVIDER_MODE: "stripe-sandbox" }))
+      .toThrow("STRIPE_EVENT_BUS_NAME is required for stripe-sandbox");
+  });
+
   it("rejects an unknown workload profile", () => {
     expect(() => marketplaceCheckoutConfiguration({ WORKLOAD_PROFILE: "production" }))
       .toThrow("WORKLOAD_PROFILE must be sandbox or production-reference.");

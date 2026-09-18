@@ -11,11 +11,13 @@ import {
   type PaymentLedger,
   type PaymentOperationCompletion,
   type PaymentOperationRecord,
+  type PaymentRecord,
 } from "./payment-command-service.js";
 import {
   DeterministicPaymentProvider,
   PaymentProviderResponseLostError,
   PaymentProviderTransientError,
+  type PaymentProvider,
 } from "./payment-provider.js";
 
 describe("Payment command boundary", () => {
@@ -46,6 +48,19 @@ describe("Payment command boundary", () => {
       createdAt: "2026-09-10T12:00:00.000Z",
       updatedAt: "2026-09-10T12:00:00.000Z",
     }));
+  });
+
+  it("passes the durable provider reference to later provider mutations", async () => {
+    const ledger = new MemoryPaymentLedger();
+    const provider = new ReferenceRequiredProvider();
+    const payment = service(ledger, provider);
+
+    await payment.execute(authorizeCommand());
+    await expect(payment.execute(captureCommand())).resolves.toEqual(
+      expect.objectContaining({ status: "CAPTURED" }),
+    );
+
+    expect(provider.captureReference).toBe("pi_payment-123");
   });
 
   it("reconciles an abandoned capture before attempting a refund", async () => {
@@ -115,6 +130,49 @@ describe("Payment command boundary", () => {
     expect(provider.mutationCount("payment:payment-123:capture")).toBe(1);
   });
 
+  it("repairs a successful provider mutation whose local response was lost", async () => {
+    const ledger = new MemoryPaymentLedger();
+    const provider = new DeterministicPaymentProvider({
+      failurePlan: { "payment:payment-123:capture": ["COMMIT_THEN_LOST_RESPONSE"] },
+    });
+    const payment = service(ledger, provider);
+    await payment.execute(authorizeCommand());
+    await expect(payment.execute(captureCommand())).rejects.toBeInstanceOf(
+      PaymentProviderResponseLostError,
+    );
+
+    const currentProviderState = await provider.retrieve({ paymentId: "payment-123" });
+    await expect(payment.reconcileProviderState("payment-123", currentProviderState))
+      .resolves.toBe("REPAIRED");
+
+    expect(provider.mutationCount("payment:payment-123:capture")).toBe(1);
+    expect(ledger.operation("capture-checkout-123")).toEqual(expect.objectContaining({
+      state: "SUCCEEDED",
+      result: expect.objectContaining({ status: "CAPTURED" }),
+    }));
+  });
+
+  it("does not fail an in-flight mutation when an older provider event arrives", async () => {
+    const ledger = new MemoryPaymentLedger();
+    const provider = new DeterministicPaymentProvider({
+      failurePlan: { "payment:payment-123:capture": ["FAIL_BEFORE_MUTATION"] },
+    });
+    const payment = service(ledger, provider);
+    await payment.execute(authorizeCommand());
+    await expect(payment.execute(captureCommand())).rejects.toBeInstanceOf(
+      PaymentProviderTransientError,
+    );
+
+    const earlierProviderState = await provider.retrieve({ paymentId: "payment-123" });
+    await expect(payment.reconcileProviderState("payment-123", earlierProviderState))
+      .resolves.toBe("CONSISTENT");
+
+    expect(ledger.operation("capture-checkout-123")).toEqual(expect.objectContaining({
+      state: "IN_PROGRESS",
+    }));
+    expect(ledger.operation("capture-checkout-123")).not.toHaveProperty("result");
+  });
+
   it("reconciles a failed capture as still authorized before cancellation", async () => {
     const ledger = new MemoryPaymentLedger();
     const provider = new DeterministicPaymentProvider({
@@ -173,7 +231,7 @@ describe("Payment command boundary", () => {
   });
 });
 
-function service(ledger: PaymentLedger, provider: DeterministicPaymentProvider) {
+function service(ledger: PaymentLedger, provider: PaymentProvider) {
   return new PaymentCommandService({
     ledger,
     provider,
@@ -183,6 +241,41 @@ function service(ledger: PaymentLedger, provider: DeterministicPaymentProvider) 
       return () => `payment-event-${++sequence}`;
     })(),
   });
+}
+
+class ReferenceRequiredProvider implements PaymentProvider {
+  public captureReference: string | undefined;
+
+  public authorize() {
+    return Promise.resolve({
+      kind: "APPLIED" as const,
+      providerReference: "pi_payment-123",
+      status: "AUTHORIZED" as const,
+    });
+  }
+
+  public capture(request: Parameters<PaymentProvider["capture"]>[0]) {
+    this.captureReference = request.providerReference;
+    return Promise.resolve(request.providerReference === undefined
+      ? { kind: "REJECTED" as const, rejectionCode: "MISSING_PROVIDER_REFERENCE" }
+      : {
+          kind: "APPLIED" as const,
+          providerReference: request.providerReference,
+          status: "CAPTURED" as const,
+        });
+  }
+
+  public cancel() {
+    throw new Error("Not used by this test");
+  }
+
+  public refund() {
+    throw new Error("Not used by this test");
+  }
+
+  public retrieve() {
+    throw new Error("Not used by this test");
+  }
 }
 
 function authorizeCommand(): AuthorizePaymentCommand {
@@ -252,6 +345,7 @@ class MemoryPaymentLedger implements PaymentLedger {
   readonly events: Array<Record<string, unknown>> = [];
   readonly #operations = new Map<string, PaymentOperationRecord>();
   readonly #active = new Map<string, string>();
+  readonly #payments = new Map<string, PaymentRecord>();
 
   public operation(operationId: string): PaymentOperationRecord | undefined {
     return this.#operations.get(operationId);
@@ -259,6 +353,10 @@ class MemoryPaymentLedger implements PaymentLedger {
 
   public findOperation(operationId: string): Promise<PaymentOperationRecord | undefined> {
     return Promise.resolve(this.operation(operationId));
+  }
+
+  public findPayment(paymentId: string): Promise<PaymentRecord | undefined> {
+    return Promise.resolve(this.#payments.get(paymentId));
   }
 
   public findActiveOperation(paymentId: string): Promise<PaymentOperationRecord | undefined> {
@@ -289,6 +387,27 @@ class MemoryPaymentLedger implements PaymentLedger {
     };
     this.#operations.set(operation.operationId, completed);
     this.#active.delete(operation.paymentId);
+    const previousPayment = this.#payments.get(operation.paymentId);
+    this.#payments.set(operation.paymentId, {
+      recordKey: `PAYMENT#${operation.paymentId}`,
+      recordType: "PAYMENT",
+      paymentId: operation.paymentId,
+      checkoutId: operation.checkoutId,
+      ...(completion.state === "SUCCEEDED"
+        ? {
+            status: completion.result.status,
+            providerReference: completion.providerReference,
+          }
+        : previousPayment?.status === undefined
+          ? {}
+          : {
+              status: previousPayment.status,
+              ...(previousPayment.providerReference === undefined
+                ? {}
+                : { providerReference: previousPayment.providerReference }),
+            }),
+      updatedAt: completion.updatedAt,
+    });
     if (completion.event !== undefined) this.events.push(completion.event);
     return Promise.resolve(completion.result);
   }

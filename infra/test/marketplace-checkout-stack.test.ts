@@ -286,6 +286,67 @@ describe("marketplace checkout Order, Inventory, and Payment Saga", () => {
     expect(policies).toContain("FAILURE_PLAN#*");
   });
 
+  it("routes Stripe partner events to secret-safe Payment reconciliation", () => {
+    const stripe = workloadTemplate({
+      paymentProviderMode: "stripe-sandbox",
+      stripeEventBusName: "aws.partner/stripe.com/ed_test_123",
+    });
+    const functions = Object.values(stripe.findResources("AWS::Lambda::Function"));
+    const payment = functions.find((fn) =>
+      fn.Properties?.FunctionName === "aws-architecture-lab-payment-command"
+    );
+    const reconciler = functions.find((fn) =>
+      fn.Properties?.FunctionName === "aws-architecture-lab-stripe-event-reconciler"
+    );
+
+    expect(payment?.Properties?.Environment?.Variables).toEqual(expect.objectContaining({
+      PAYMENT_PROVIDER_MODE: "stripe-sandbox",
+    }));
+    expect(reconciler?.Properties?.Environment?.Variables).toEqual(expect.objectContaining({
+      PAYMENT_PROVIDER_MODE: "stripe-sandbox",
+      PAYMENT_TABLE_NAME: expect.anything(),
+      PAYMENT_OUTBOX_TABLE_NAME: expect.anything(),
+    }));
+    expect(JSON.stringify(payment?.Properties?.Environment?.Variables)).not.toMatch(
+      /sk_test_|api.?key|secret/i,
+    );
+    expect(JSON.stringify(reconciler?.Properties?.Environment?.Variables)).not.toMatch(
+      /sk_test_|api.?key|secret/i,
+    );
+
+    stripe.hasResourceProperties("AWS::Events::Rule", {
+      EventBusName: "aws.partner/stripe.com/ed_test_123",
+      EventPattern: Match.objectLike({
+        detail: Match.objectLike({
+          type: Match.arrayWith([
+            Match.objectLike({ prefix: "payment_intent." }),
+            Match.objectLike({ prefix: "refund." }),
+          ]),
+        }),
+      }),
+      Targets: Match.arrayWith([Match.objectLike({
+        DeadLetterConfig: Match.objectLike({ Arn: Match.anyValue() }),
+        RetryPolicy: { MaximumEventAgeInSeconds: 300, MaximumRetryAttempts: 2 },
+      })]),
+    });
+    stripe.hasResourceProperties("AWS::Logs::MetricFilter", {
+      FilterPattern: '{ $.eventType = "ProviderDivergence" }',
+    });
+    stripe.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmDescription: Match.stringLikeRegexp("provider divergence"),
+      Threshold: 1,
+    });
+    expect(JSON.stringify(stripe.findResources("AWS::IAM::Policy")))
+      .toContain("secretsmanager:GetSecretValue");
+    stripe.hasResourceProperties("AWS::Lambda::EventInvokeConfig", {
+      DestinationConfig: Match.objectLike({
+        OnFailure: Match.objectLike({ Destination: Match.anyValue() }),
+      }),
+      MaximumEventAgeInSeconds: 300,
+      MaximumRetryAttempts: 2,
+    });
+  }, 30_000);
+
   it("omits the failure-plan control plane from production-reference synthesis", () => {
     const productionReference = workloadTemplate({ enableFakePaymentFailurePlans: false });
     productionReference.resourceCountIs("AWS::DynamoDB::Table", 13);

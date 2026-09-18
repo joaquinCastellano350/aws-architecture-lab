@@ -22,7 +22,9 @@ forward and never invents cancellation.
 6. A `RESERVED` outcome advances to a versioned Payment authorization command. Payment
    records the operation as `IN_PROGRESS`, calls a provider-neutral manual-capture
    capability with a semantic key, and atomically records its stable result and
-   `PaymentAuthorized` fact.
+   `PaymentAuthorized` fact. Sandbox deployments can select either the durable deterministic
+   provider or Stripe test PaymentIntents. Stripe keys are fetched from Secrets Manager at
+   runtime and never enter Lambda configuration or workflow data.
 7. Payment authorization rejection or exhausted fail-before-mutation, timeout, or throttling
    retries releases Inventory exactly once. Because no authorization was confirmed, no Payment
    cancellation is invented. Order becomes `COMPENSATING` before the release and advances to
@@ -68,15 +70,21 @@ forward and never invents cancellation.
 17. The Order audit consumer records each distinct routed Order fact with a conditional write keyed by
    `eventId`. Repeated EventBridge delivery therefore succeeds without duplicating the
    audit record.
-18. Exhausted refund, cancellation, or Inventory-release attempts invoke the Order and
+18. In Stripe mode, `payment_intent.*` and `refund.*` arrive independently on the Stripe partner
+    EventBridge bus. The consumer ignores the event's claimed historical state, retrieves current
+    Stripe state, and repairs an abandoned local operation idempotently. Duplicate and reordered
+    notifications are therefore safe. Unrepairable local/provider disagreement emits the
+    `ProviderDivergence` metric, retries through EventBridge, and eventually reaches an encrypted
+    dead-letter queue.
+19. Exhausted refund, cancellation, or Inventory-release attempts invoke the Order and
     Reconciliation capabilities. The resulting work record captures the failed invariant,
     required action, attempts, correlation, the Saga's actual immutable workflow version, and
     timestamps. `ReconciliationRequired` is published transactionally and a log metric raises the
     dedicated actionable alarm; expected Inventory, Payment, and capacity rejections never emit it.
-19. A handoff callback failure retrieves Fulfillment-owned state. A committed handoff continues
+20. A handoff callback failure retrieves Fulfillment-owned state. A committed handoff continues
     toward Order confirmation; unresolved ambiguity creates `RECOVER_FULFILLMENT_HANDOFF` work
     rather than cancelling Payment, Inventory, Fulfillment, or Order.
-20. `workload:replay` requires a unique operation ID, operator identity, and reason, appends that audit entry, and starts
+21. `workload:replay` requires a unique operation ID, operator identity, and reason, appends that audit entry, and starts
     the workflow version recorded by the original Saga. Its replay route invokes only versioned
     domain commands with stable operation identifiers. Resolution atomically updates the work and
     Saga and publishes `ReconciliationResolved`.

@@ -12,6 +12,7 @@ export interface AuthorizeProviderPayment {
 export interface MutateProviderPayment {
   readonly operationKey: string;
   readonly paymentId: string;
+  readonly providerReference?: string;
 }
 
 export interface RefundProviderPayment extends MutateProviderPayment {
@@ -39,7 +40,10 @@ export interface PaymentProvider {
   capture(request: MutateProviderPayment): Promise<PaymentProviderMutationResult>;
   cancel(request: MutateProviderPayment): Promise<PaymentProviderMutationResult>;
   refund(request: RefundProviderPayment): Promise<PaymentProviderMutationResult>;
-  retrieve(request: { readonly paymentId: string }): Promise<PaymentProviderRetrievalResult>;
+  retrieve(request: {
+    readonly paymentId: string;
+    readonly providerReference?: string;
+  }): Promise<PaymentProviderRetrievalResult>;
 }
 
 export type PaymentProviderFailureEffect =

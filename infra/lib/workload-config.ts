@@ -1,8 +1,12 @@
 import type { MarketplaceCheckoutStackProps } from "./marketplace-checkout-stack.js";
+import { requiredStripeEventBusName } from "./stripe-configuration.js";
 
 export type MarketplaceCheckoutConfiguration = Pick<
   MarketplaceCheckoutStackProps,
-  "enableFakePaymentFailurePlans" | "lambdaReservedConcurrency"
+  | "enableFakePaymentFailurePlans"
+  | "lambdaReservedConcurrency"
+  | "paymentProviderMode"
+  | "stripeEventBusName"
 >;
 
 export function marketplaceCheckoutConfiguration(
@@ -15,8 +19,17 @@ export function marketplaceCheckoutConfiguration(
   const profileConfiguration = profile === "production-reference"
     ? { enableFakePaymentFailurePlans: false as const }
     : {};
+  const providerMode = environment.PAYMENT_PROVIDER_MODE;
+  const providerConfiguration: MarketplaceCheckoutConfiguration = providerMode === "stripe-sandbox"
+    ? {
+        paymentProviderMode: "stripe-sandbox",
+        stripeEventBusName: requiredStripeEventBusName(environment),
+      }
+    : {};
   const rawReservedConcurrency = environment.LAMBDA_RESERVED_CONCURRENCY;
-  if (rawReservedConcurrency === undefined) return profileConfiguration;
+  if (rawReservedConcurrency === undefined) {
+    return { ...profileConfiguration, ...providerConfiguration };
+  }
 
   const lambdaReservedConcurrency = Number(rawReservedConcurrency);
   if (
@@ -27,5 +40,5 @@ export function marketplaceCheckoutConfiguration(
     throw new Error("LAMBDA_RESERVED_CONCURRENCY must be unset or an integer from 1 through 10.");
   }
 
-  return { ...profileConfiguration, lambdaReservedConcurrency };
+  return { ...profileConfiguration, ...providerConfiguration, lambdaReservedConcurrency };
 }

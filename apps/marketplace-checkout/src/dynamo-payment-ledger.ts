@@ -10,21 +10,11 @@ import type {
   PaymentLedger,
   PaymentOperationCompletion,
   PaymentOperationRecord,
+  PaymentRecord,
 } from "./payment-command-service.js";
 
 export interface DynamoPaymentLedgerDependencies {
   readonly client?: DynamoDBDocumentClient;
-}
-
-interface PaymentRecord {
-  readonly recordKey: string;
-  readonly recordType: "PAYMENT";
-  readonly paymentId: string;
-  readonly checkoutId: string;
-  readonly status?: PaymentCommandOutcome["status"];
-  readonly activeOperationId?: string;
-  readonly providerReference?: string;
-  readonly updatedAt: string;
 }
 
 export class DynamoPaymentLedger implements PaymentLedger {
@@ -54,15 +44,19 @@ export class DynamoPaymentLedger implements PaymentLedger {
   }
 
   public async findActiveOperation(paymentId: string): Promise<PaymentOperationRecord | undefined> {
+    const payment = await this.findPayment(paymentId);
+    return payment?.activeOperationId === undefined
+      ? undefined
+      : this.findOperation(payment.activeOperationId);
+  }
+
+  public async findPayment(paymentId: string): Promise<PaymentRecord | undefined> {
     const result = await this.#client.send(new GetCommand({
       TableName: this.#paymentTableName,
       Key: { recordKey: paymentKey(paymentId) },
       ConsistentRead: true,
     }));
-    const payment = result.Item as PaymentRecord | undefined;
-    return payment?.activeOperationId === undefined
-      ? undefined
-      : this.findOperation(payment.activeOperationId);
+    return result.Item as PaymentRecord | undefined;
   }
 
   public async begin(operation: PaymentOperationRecord): Promise<PaymentOperationRecord> {
