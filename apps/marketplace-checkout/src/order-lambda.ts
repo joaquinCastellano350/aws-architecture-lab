@@ -1,0 +1,97 @@
+import type { Handler } from "aws-lambda";
+import {
+  validateCreatePendingOrderCommand,
+  validateMarkOrderCancelledCommand,
+  validateMarkOrderCompensatingCommand,
+  validateMarkOrderConfirmedCommand,
+  validateMarkOrderExpiredCommand,
+  validateMarkOrderInventoryUnavailableCommand,
+  validateMarkOrderReconciliationRequiredCommand,
+  type CreatePendingOrderOutcome,
+  type MarkOrderCancelledOutcome,
+  type MarkOrderCompensatingOutcome,
+  type MarkOrderConfirmedOutcome,
+  type MarkOrderExpiredOutcome,
+  type MarkOrderInventoryUnavailableOutcome,
+  type MarkOrderReconciliationRequiredOutcome,
+} from "@aws-architecture-lab/contracts";
+
+import {
+  createPendingOrder,
+  markOrderCancelled,
+  markOrderCompensating,
+  markOrderConfirmed,
+  markOrderExpired,
+  markOrderInventoryUnavailable,
+  markOrderReconciliationRequired,
+} from "./dynamo-order-repository.js";
+import { commandTypeOf } from "./domain-command.js";
+import { requiredEnvironment } from "./environment.js";
+
+const orderTableName = requiredEnvironment("ORDER_TABLE_NAME");
+const outboxTableName = requiredEnvironment("ORDER_OUTBOX_TABLE_NAME");
+
+export const handler: Handler<
+  unknown,
+  | CreatePendingOrderOutcome
+  | MarkOrderCancelledOutcome
+  | MarkOrderCompensatingOutcome
+  | MarkOrderInventoryUnavailableOutcome
+  | MarkOrderReconciliationRequiredOutcome
+  | MarkOrderExpiredOutcome
+  | MarkOrderConfirmedOutcome
+> = async (event) => {
+  if (commandTypeOf(event) === "MarkOrderReconciliationRequired") {
+    const validation = validateMarkOrderReconciliationRequiredCommand(event);
+    if (!validation.ok) throw new Error(validation.error);
+    return markOrderReconciliationRequired(
+      orderTableName,
+      outboxTableName,
+      validation.value,
+    );
+  }
+  if (commandTypeOf(event) === "MarkOrderCompensating") {
+    const validation = validateMarkOrderCompensatingCommand(event);
+    if (!validation.ok) throw new Error(validation.error);
+    return markOrderCompensating(orderTableName, outboxTableName, validation.value);
+  }
+  if (commandTypeOf(event) === "MarkOrderCancelled") {
+    const validation = validateMarkOrderCancelledCommand(event);
+    if (!validation.ok) throw new Error(validation.error);
+    return markOrderCancelled(orderTableName, outboxTableName, validation.value);
+  }
+  if (commandTypeOf(event) === "MarkOrderConfirmed") {
+    const validation = validateMarkOrderConfirmedCommand(event);
+    if (!validation.ok) throw new Error(validation.error);
+    return markOrderConfirmed(orderTableName, outboxTableName, validation.value);
+  }
+  if (commandTypeOf(event) === "MarkOrderExpired") {
+    const validation = validateMarkOrderExpiredCommand(event);
+    if (!validation.ok) throw new Error(validation.error);
+    return markOrderExpired(orderTableName, outboxTableName, validation.value);
+  }
+  if (commandTypeOf(event) === "MarkOrderInventoryUnavailable") {
+    const validation = validateMarkOrderInventoryUnavailableCommand(event);
+    if (!validation.ok) throw new Error(validation.error);
+    return markOrderInventoryUnavailable(
+      orderTableName,
+      outboxTableName,
+      validation.value,
+    );
+  }
+  const validation = validateCreatePendingOrderCommand(event);
+  if (!validation.ok) throw new Error(validation.error);
+  const order = await createPendingOrder(orderTableName, outboxTableName, validation.value);
+  console.info(JSON.stringify({
+    event: "OrderPending",
+    checkoutId: order.checkoutId,
+    correlationId: order.correlationId,
+    status: order.status,
+  }));
+  return {
+    schemaVersion: "1.0",
+    checkoutId: order.checkoutId,
+    correlationId: order.correlationId,
+    status: order.status,
+  };
+};

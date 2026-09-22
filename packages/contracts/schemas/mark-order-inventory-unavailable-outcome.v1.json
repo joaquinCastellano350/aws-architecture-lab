@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:order:mark-inventory-unavailable-outcome:v1",
+  "title": "MarkOrderInventoryUnavailableOutcome",
+  "type": "object",
+  "required": ["schemaVersion", "checkoutId", "correlationId", "status"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "status": { "type": "string", "const": "INVENTORY_UNAVAILABLE" }
+  },
+  "additionalProperties": true
+}

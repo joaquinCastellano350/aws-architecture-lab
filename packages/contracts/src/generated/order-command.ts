@@ -1,0 +1,368 @@
+// Generated from schemas/create-pending-order-*.v1.json. Do not edit by hand.
+
+export interface CreatePendingOrderCommand {
+  readonly schemaVersion: "1.0";
+  readonly checkoutId: string;
+  readonly cartId: string;
+  readonly correlationId: string;
+  readonly causationId?: string;
+  readonly [key: string]: unknown;
+}
+
+export interface CreatePendingOrderOutcome {
+  readonly schemaVersion: "1.0";
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly status: "PENDING";
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderInventoryUnavailableCommand {
+  readonly schemaVersion: "1.0";
+  readonly commandType: "MarkOrderInventoryUnavailable";
+  readonly operationId: string;
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly causationId: string;
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderInventoryUnavailableOutcome {
+  readonly schemaVersion: "1.0";
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly status: "INVENTORY_UNAVAILABLE";
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderExpiredCommand {
+  readonly schemaVersion: "1.0";
+  readonly commandType: "MarkOrderExpired";
+  readonly operationId: string;
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly causationId: string;
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderExpiredOutcome {
+  readonly schemaVersion: "1.0";
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly status: "EXPIRED";
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderConfirmedCommand {
+  readonly schemaVersion: "1.0";
+  readonly commandType: "MarkOrderConfirmed";
+  readonly operationId: string;
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly causationId: string;
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderConfirmedOutcome {
+  readonly schemaVersion: "1.0";
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly status: "CONFIRMED";
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderCompensatingCommand {
+  readonly schemaVersion: "1.0";
+  readonly commandType: "MarkOrderCompensating";
+  readonly operationId: string;
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly causationId: string;
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderCompensatingOutcome {
+  readonly schemaVersion: "1.0";
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly status: "COMPENSATING";
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderCancelledCommand {
+  readonly schemaVersion: "1.0";
+  readonly commandType: "MarkOrderCancelled";
+  readonly operationId: string;
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly causationId: string;
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderCancelledOutcome {
+  readonly schemaVersion: "1.0";
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly status: "CANCELLED";
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderReconciliationRequiredCommand {
+  readonly schemaVersion: "1.0";
+  readonly commandType: "MarkOrderReconciliationRequired";
+  readonly operationId: string;
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly causationId: string;
+  readonly [key: string]: unknown;
+}
+
+export interface MarkOrderReconciliationRequiredOutcome {
+  readonly schemaVersion: "1.0";
+  readonly checkoutId: string;
+  readonly correlationId: string;
+  readonly status: "RECONCILIATION_REQUIRED";
+  readonly [key: string]: unknown;
+}
+
+export type OrderContractValidationResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: string };
+
+export function validateCreatePendingOrderCommand(
+  input: unknown,
+): OrderContractValidationResult<CreatePendingOrderCommand> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || !["1.0"].includes((input as Record<string, unknown>)["schemaVersion"] as string)) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["cartId"] !== "string" || String((input as Record<string, unknown>)["cartId"]).length < 1 || String((input as Record<string, unknown>)["cartId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    ((input as Record<string, unknown>)["causationId"] !== undefined && (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256))
+  ) {
+    return { ok: false, error: "Value does not match CreatePendingOrderCommand" };
+  }
+  return { ok: true, value: input as CreatePendingOrderCommand };
+}
+
+export function validateCreatePendingOrderOutcome(
+  input: unknown,
+): OrderContractValidationResult<CreatePendingOrderOutcome> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || !["1.0"].includes((input as Record<string, unknown>)["schemaVersion"] as string)) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || !["PENDING"].includes((input as Record<string, unknown>)["status"] as string))
+  ) {
+    return { ok: false, error: "Value does not match CreatePendingOrderOutcome" };
+  }
+  return { ok: true, value: input as CreatePendingOrderOutcome };
+}
+
+export function validateMarkOrderInventoryUnavailableCommand(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderInventoryUnavailableCommand> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["commandType"] !== "string" || (input as Record<string, unknown>)["commandType"] !== "MarkOrderInventoryUnavailable") ||
+    (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256)
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderInventoryUnavailableCommand" };
+  }
+  return { ok: true, value: input as MarkOrderInventoryUnavailableCommand };
+}
+
+export function validateMarkOrderInventoryUnavailableOutcome(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderInventoryUnavailableOutcome> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || (input as Record<string, unknown>)["status"] !== "INVENTORY_UNAVAILABLE")
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderInventoryUnavailableOutcome" };
+  }
+  return { ok: true, value: input as MarkOrderInventoryUnavailableOutcome };
+}
+
+export function validateMarkOrderExpiredCommand(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderExpiredCommand> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["commandType"] !== "string" || (input as Record<string, unknown>)["commandType"] !== "MarkOrderExpired") ||
+    (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256)
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderExpiredCommand" };
+  }
+  return { ok: true, value: input as MarkOrderExpiredCommand };
+}
+
+export function validateMarkOrderExpiredOutcome(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderExpiredOutcome> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || (input as Record<string, unknown>)["status"] !== "EXPIRED")
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderExpiredOutcome" };
+  }
+  return { ok: true, value: input as MarkOrderExpiredOutcome };
+}
+
+export function validateMarkOrderConfirmedCommand(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderConfirmedCommand> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["commandType"] !== "string" || (input as Record<string, unknown>)["commandType"] !== "MarkOrderConfirmed") ||
+    (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256)
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderConfirmedCommand" };
+  }
+  return { ok: true, value: input as MarkOrderConfirmedCommand };
+}
+
+export function validateMarkOrderConfirmedOutcome(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderConfirmedOutcome> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || (input as Record<string, unknown>)["status"] !== "CONFIRMED")
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderConfirmedOutcome" };
+  }
+  return { ok: true, value: input as MarkOrderConfirmedOutcome };
+}
+
+export function validateMarkOrderCompensatingCommand(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderCompensatingCommand> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["commandType"] !== "string" || (input as Record<string, unknown>)["commandType"] !== "MarkOrderCompensating") ||
+    (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256)
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderCompensatingCommand" };
+  }
+  return { ok: true, value: input as MarkOrderCompensatingCommand };
+}
+
+export function validateMarkOrderCompensatingOutcome(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderCompensatingOutcome> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || (input as Record<string, unknown>)["status"] !== "COMPENSATING")
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderCompensatingOutcome" };
+  }
+  return { ok: true, value: input as MarkOrderCompensatingOutcome };
+}
+
+export function validateMarkOrderCancelledCommand(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderCancelledCommand> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["commandType"] !== "string" || (input as Record<string, unknown>)["commandType"] !== "MarkOrderCancelled") ||
+    (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256)
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderCancelledCommand" };
+  }
+  return { ok: true, value: input as MarkOrderCancelledCommand };
+}
+
+export function validateMarkOrderCancelledOutcome(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderCancelledOutcome> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || (input as Record<string, unknown>)["status"] !== "CANCELLED")
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderCancelledOutcome" };
+  }
+  return { ok: true, value: input as MarkOrderCancelledOutcome };
+}
+
+export function validateMarkOrderReconciliationRequiredCommand(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderReconciliationRequiredCommand> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["commandType"] !== "string" || (input as Record<string, unknown>)["commandType"] !== "MarkOrderReconciliationRequired") ||
+    (typeof (input as Record<string, unknown>)["operationId"] !== "string" || String((input as Record<string, unknown>)["operationId"]).length < 1 || String((input as Record<string, unknown>)["operationId"]).length > 256) ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["causationId"] !== "string" || String((input as Record<string, unknown>)["causationId"]).length < 1 || String((input as Record<string, unknown>)["causationId"]).length > 256)
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderReconciliationRequiredCommand" };
+  }
+  return { ok: true, value: input as MarkOrderReconciliationRequiredCommand };
+}
+
+export function validateMarkOrderReconciliationRequiredOutcome(
+  input: unknown,
+): OrderContractValidationResult<MarkOrderReconciliationRequiredOutcome> {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    (typeof (input as Record<string, unknown>)["schemaVersion"] !== "string" || (input as Record<string, unknown>)["schemaVersion"] !== "1.0") ||
+    (typeof (input as Record<string, unknown>)["checkoutId"] !== "string" || String((input as Record<string, unknown>)["checkoutId"]).length < 1 || String((input as Record<string, unknown>)["checkoutId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["correlationId"] !== "string" || String((input as Record<string, unknown>)["correlationId"]).length < 1 || String((input as Record<string, unknown>)["correlationId"]).length > 128) ||
+    (typeof (input as Record<string, unknown>)["status"] !== "string" || (input as Record<string, unknown>)["status"] !== "RECONCILIATION_REQUIRED")
+  ) {
+    return { ok: false, error: "Value does not match MarkOrderReconciliationRequiredOutcome" };
+  }
+  return { ok: true, value: input as MarkOrderReconciliationRequiredOutcome };
+}
+

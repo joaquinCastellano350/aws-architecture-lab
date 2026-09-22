@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:payment:reconciliation-required-outcome:v1",
+  "title": "PaymentReconciliationRequiredOutcome",
+  "type": "object",
+  "required": ["schemaVersion", "operationId", "checkoutId", "paymentId", "status"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "paymentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "status": { "type": "string", "const": "RECONCILIATION_REQUIRED" }
+  },
+  "additionalProperties": true
+}

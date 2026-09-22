@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:reconciliation:command-outcome:v1",
+  "title": "ReconciliationCommandOutcome",
+  "type": "object",
+  "required": ["schemaVersion", "reconciliationId", "checkoutId", "status", "attempts"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "reconciliationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "status": { "type": "string", "enum": ["RECONCILIATION_REQUIRED", "REPLAYING", "RESOLVED"] },
+    "attempts": { "type": "integer", "minimum": 1, "maximum": 100 }
+  },
+  "additionalProperties": true
+}

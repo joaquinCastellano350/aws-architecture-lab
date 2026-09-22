@@ -1,5 +1,6 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { promisify } from "node:util";
 
 import type { CallerIdentity } from "./preflight.js";
 
@@ -7,12 +8,26 @@ export function runAwsJson(
   args: readonly string[],
   environment: NodeJS.ProcessEnv = process.env,
 ): unknown {
-  const output = execFileSync(awsExecutable(), [...args, "--output", "json", "--no-cli-pager"], {
+  const output = execFileSync(awsExecutable(), jsonArguments(args), {
     encoding: "utf8",
     env: environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  return JSON.parse(output) as unknown;
+  return parseJson(output);
+}
+
+const execFileAsync = promisify(execFile);
+
+export async function runAwsJsonAsync(
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<unknown> {
+  const { stdout } = await execFileAsync(
+    awsExecutable(),
+    jsonArguments(args),
+    { encoding: "utf8", env: environment },
+  );
+  return parseJson(stdout);
 }
 
 export function getCallerIdentity(environment: NodeJS.ProcessEnv = process.env): CallerIdentity {
@@ -44,4 +59,12 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 function awsExecutable(): string {
   return process.platform === "win32" ? "aws.exe" : "aws";
+}
+
+function jsonArguments(args: readonly string[]): string[] {
+  return [...args, "--output", "json", "--no-cli-pager"];
+}
+
+function parseJson(output: string): unknown {
+  return JSON.parse(output) as unknown;
 }

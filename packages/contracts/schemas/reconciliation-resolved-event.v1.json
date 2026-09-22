@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:reconciliation:resolved-event:v1",
+  "title": "ReconciliationResolvedEvent",
+  "type": "object",
+  "required": ["eventId", "eventType", "eventVersion", "occurredAt", "correlationId", "causationId", "aggregateType", "aggregateId", "payload"],
+  "properties": {
+    "eventId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "eventType": { "type": "string", "const": "ReconciliationResolved" },
+    "eventVersion": { "type": "string", "const": "1.0" },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "causationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "aggregateType": { "type": "string", "const": "Reconciliation" },
+    "aggregateId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "payload": {
+      "type": "object",
+      "required": ["checkoutId", "status", "attempts"],
+      "properties": {
+        "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "status": { "type": "string", "const": "RESOLVED" },
+        "attempts": { "type": "integer", "minimum": 1, "maximum": 100 }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

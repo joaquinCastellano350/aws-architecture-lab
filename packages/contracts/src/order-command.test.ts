@@ -1,0 +1,160 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  validateCreatePendingOrderCommand,
+  validateCreatePendingOrderOutcome,
+  validateMarkOrderExpiredCommand,
+  validateMarkOrderExpiredOutcome,
+  validateMarkOrderConfirmedCommand,
+  validateMarkOrderConfirmedOutcome,
+  validateMarkOrderCancelledCommand,
+  validateMarkOrderCancelledOutcome,
+  validateMarkOrderCompensatingCommand,
+  validateMarkOrderCompensatingOutcome,
+  validateMarkOrderInventoryUnavailableCommand,
+  validateMarkOrderInventoryUnavailableOutcome,
+  validateMarkOrderReconciliationRequiredCommand,
+  validateMarkOrderReconciliationRequiredOutcome,
+} from "./generated/order-command.js";
+
+describe("Order command JSON schemas", () => {
+  it("accepts the versioned pending-Order command and sanitized outcome", () => {
+    expect(validateCreatePendingOrderCommand({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      cartId: "cart-123",
+      correlationId: "corr-123",
+      causationId: "command-123",
+    }).ok).toBe(true);
+    expect(validateCreatePendingOrderOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "command-123",
+      status: "PENDING",
+    }).ok).toBe(true);
+    expect(validateCreatePendingOrderCommand({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-from-older-workflow",
+      cartId: "cart-123",
+      correlationId: "corr-123",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the typed Order outcome for an unavailable Inventory reservation", () => {
+    const command = {
+      schemaVersion: "1.0",
+      commandType: "MarkOrderInventoryUnavailable",
+      operationId: "mark-inventory-unavailable-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    };
+
+    expect(validateMarkOrderInventoryUnavailableCommand(command).ok).toBe(true);
+    expect(validateMarkOrderInventoryUnavailableOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "INVENTORY_UNAVAILABLE",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the typed terminal Order expiry command and outcome", () => {
+    expect(validateMarkOrderExpiredCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderExpired",
+      operationId: "expire-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "inventory-released-event-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderExpiredOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "EXPIRED",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the typed Order confirmation command and outcome", () => {
+    expect(validateMarkOrderConfirmedCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderConfirmed",
+      operationId: "confirm-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "fulfillment-handoff-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderConfirmedOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "CONFIRMED",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the typed Order cancellation command and outcome", () => {
+    expect(validateMarkOrderCancelledCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderCancelled",
+      operationId: "cancel-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderCancelledOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "CANCELLED",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the customer-visible compensation-in-progress command and outcome", () => {
+    expect(validateMarkOrderCompensatingCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderCompensating",
+      operationId: "compensate-order-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderCompensatingOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "COMPENSATING",
+    }).ok).toBe(true);
+  });
+
+  it("accepts the explicit reconciliation-required command and outcome", () => {
+    expect(validateMarkOrderReconciliationRequiredCommand({
+      schemaVersion: "1.0",
+      commandType: "MarkOrderReconciliationRequired",
+      operationId: "mark-order-reconciliation-checkout-123",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      causationId: "execution-123",
+    }).ok).toBe(true);
+    expect(validateMarkOrderReconciliationRequiredOutcome({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+      correlationId: "corr-123",
+      status: "RECONCILIATION_REQUIRED",
+    }).ok).toBe(true);
+  });
+
+  it("rejects unsupported versions and incomplete commands", () => {
+    expect(validateCreatePendingOrderCommand({
+      schemaVersion: "2.0",
+      checkoutId: "checkout-123",
+      cartId: "cart-123",
+      correlationId: "corr-123",
+    }).ok).toBe(false);
+    expect(validateCreatePendingOrderCommand({
+      schemaVersion: "1.0",
+      checkoutId: "checkout-123",
+    }).ok).toBe(false);
+  });
+});

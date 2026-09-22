@@ -4,12 +4,12 @@ import { describe, expect, it } from "vitest";
 
 import { SandboxFoundationStack } from "../lib/sandbox-foundation-stack.js";
 
+const template = foundationTemplate();
+
 describe("sandbox foundation", () => {
   it(
     "notifies the owner at every agreed actual and forecast budget threshold",
     () => {
-      const template = foundationTemplate();
-
       template.hasResourceProperties("AWS::Budgets::Budget", {
         Budget: {
           BudgetLimit: { Amount: 30, Unit: "USD" },
@@ -32,8 +32,6 @@ describe("sandbox foundation", () => {
   it(
     "automatically blocks new deployments and scaling at USD 50 without blocking teardown",
     () => {
-      const template = foundationTemplate();
-
       template.hasResourceProperties("AWS::Budgets::BudgetsAction", {
         ActionThreshold: { Type: "ABSOLUTE_VALUE", Value: 50 },
         ActionType: "APPLY_IAM_POLICY",
@@ -111,8 +109,6 @@ describe("sandbox foundation", () => {
   it(
     "alerts on a low absolute cost anomaly threshold",
     () => {
-      const template = foundationTemplate();
-
       template.hasResourceProperties("AWS::CE::AnomalyMonitor", {
         MonitorDimension: "SERVICE",
         MonitorName: "aws-architecture-lab-service-costs",
@@ -133,8 +129,6 @@ describe("sandbox foundation", () => {
   it(
     "creates an AWS-managed encrypted Stripe sandbox secret without plaintext material",
     () => {
-      const template = foundationTemplate();
-
       template.hasResourceProperties("AWS::SecretsManager::Secret", {
         Description: "Stripe Sandbox API key placeholder; populate it outside CloudFormation.",
         GenerateSecretString: {
@@ -162,7 +156,6 @@ describe("sandbox foundation", () => {
   it(
     "tags cost resources and contains no workload resources",
     () => {
-      const template = foundationTemplate();
       const resourceTags = Match.arrayWith([
         { Key: "environment", Value: "sandbox" },
         { Key: "project", Value: "aws-architecture-lab" },
@@ -201,8 +194,6 @@ describe("sandbox foundation", () => {
   it(
     "confines the budget action role trust to this account's budgets",
     () => {
-      const template = foundationTemplate();
-
       template.hasResourceProperties("AWS::IAM::Role", {
         AssumeRolePolicyDocument: {
           Statement: Match.arrayWith([

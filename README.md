@@ -44,6 +44,34 @@ $env:CHECKOUT_REQUEST_CEILING = "20" # hard maximum: 9000
 $env:BUDGET_NOTIFICATION_EMAIL = "owner@example.com"
 ```
 
+Stripe Sandbox mode also requires a Stripe Event Destination for Amazon EventBridge. Associate
+the Stripe partner event source with an EventBridge bus in `us-east-1`, subscribe it to
+`payment_intent.*` and `refund.*`, and provide the resulting partner bus name:
+
+```powershell
+$env:PAYMENT_PROVIDER_MODE = "stripe-sandbox"
+$env:STRIPE_EVENT_BUS_NAME = "aws.partner/stripe.com/ed_test_..."
+```
+
+Only the partner bus name is passed to CloudFormation. The Stripe API key remains in the
+foundation secret and is fetched by the Payment Lambdas at runtime. The runtime rejects keys
+that do not begin with `sk_test_`.
+
+`LAMBDA_RESERVED_CONCURRENCY` is optional and applies to each marketplace-checkout Lambda.
+Leave it unset when the account has no reservable concurrency, such as a new account with a
+total concurrency quota of 10. Accounts with sufficient quota can opt in with a value from 1
+through 10:
+
+```powershell
+# Constrained sandbox: remove the setting instead of assigning zero.
+Remove-Item Env:LAMBDA_RESERVED_CONCURRENCY -ErrorAction SilentlyContinue
+
+# Account with enough reservable concurrency: reserve this amount per Lambda.
+$env:LAMBDA_RESERVED_CONCURRENCY = "3"
+```
+
+Do not set it to `0`: Lambda uses zero reserved concurrency to disable function invocations.
+
 Then use the repeatable entry points from the repository root:
 
 ```shell
@@ -76,3 +104,125 @@ aws secretsmanager put-secret-value `
 
 `foundation:verify` reads stack, processed-template, budget, action, anomaly, IAM-policy,
 and secret metadata. It deliberately never calls `secretsmanager get-secret-value`.
+
+## Marketplace checkout walking skeleton
+
+The first ephemeral workload exposes the OpenAPI-defined `POST /checkouts` and
+`GET /checkouts/{checkoutId}` operations. Both require IAM/SigV4. Submission is
+asynchronous: a successful POST returns `202 Accepted` and a status location while a
+Step Functions Standard execution, admitted through the `LIVE` alias, creates the
+customer-visible pending Order, reserves Inventory without overselling, captures a
+manual-capture Payment through a provider-neutral capability, commits Inventory, completes
+an SQS-buffered Fulfillment handoff, and confirms the Order. Optional additive `itemId`
+and `quantity` request fields select stock; older v1 clients use the deterministic lab item
+and a quantity of one.
+
+The Payment capability owns a durable operation ledger and transactional outbox. Its
+deterministic fake provider persists separate provider state and uses semantic keys for
+authorize, capture, cancel, and refund, so repeated requests preserve one economic result.
+Sandbox failure plans are durable records in a dedicated table under the `FAILURE_PLAN#`
+key namespace. They can be changed only through the output
+`FakePaymentFailurePlanRoleArn`; the Payment and Fulfillment Lambdas have read-only access
+and consume them
+  to model fail-before-mutation, business rejection, throttling, timeout, duplicate delivery,
+  and ambiguous completion. Production-reference
+synthesis disables this test control plane when `WORKLOAD_PROFILE=production-reference`.
+The workflow enters capture only after a typed Fulfillment capacity reservation. It then
+commits Inventory and sends a versioned handoff command with a Step Functions task token
+in the body of an encrypted SQS message. A dedicated worker role heartbeats, commits the
+irreversible handoff idempotently, and completes the callback before Order becomes
+`CONFIRMED`. Task tokens are never placed in message attributes, logs, traces, metrics,
+errors, URLs, or persistence.
+
+Before Payment capture, failure is terminal but fully reversible. Inventory rejection ends
+without compensation. Payment authorization rejection or bounded retry exhaustion releases
+Inventory once. Fulfillment reservation failure cancels the authorization and then releases
+Inventory in reverse order. The Order exposes `COMPENSATING` before recovery starts.
+
+After a capture failure, the workflow retrieves provider state before choosing whether to cancel
+the authorization or refund a completed capture. An Inventory commit failure after capture refunds
+Payment, cancels the reversible Fulfillment reservation, and releases Inventory. Stable operation
+IDs and durable outcomes make replay safe, and the Order becomes `CANCELLED` only after all
+required compensation outcomes are confirmed.
+
+If bounded compensation exhausts its retries, both Order and Saga become
+`RECONCILIATION_REQUIRED`. A separately owned record captures the failed invariant, required
+domain action, attempt count, business correlation, immutable workflow version, and timestamps;
+its transactional outbox fact drives a dedicated actionable CloudWatch alarm. Failures after the
+irreversible Fulfillment handoff are retrieved and recovered forward—never reported as cancelled.
+An operator can resume the pinned workflow through the audited replay command; recovery reuses
+the same versioned domain contracts and idempotency ledgers and never edits domain tables.
+
+The OpenAPI 3.0 contract is versioned `6.0.0` and exposes `COMPENSATING`,
+`RECONCILIATION_REQUIRED`, `CANCELLED`,
+`CONFIRMED`, and `EXPIRED` customer outcomes while
+continuing to accept the existing v1 submission schema. Reservations carry a five-minute business deadline. The
+workflow compensates a captured Payment if Inventory can no longer commit. A one-minute
+reconciliation schedule queries the reservation-expiry index and releases abandoned
+reservations idempotently; DynamoDB TTL is assigned only after expiry release and is used
+solely for eventual storage cleanup. The resulting `InventoryReleased` fact independently
+repairs a still-pending Order, so a worker failure between bounded contexts cannot leave the
+customer-visible state permanently stale.
+
+After the foundation has been deployed, use the same preflight environment shown above:
+
+```shell
+npm run workload:synth
+npm run workload:deploy
+npm run workload:smoke
+npm run workload:expiry
+npm run workload:failure
+npm run workload:replay -- --operation-id <unique-id> --reconciliation-id <id> --requested-by <operator> --reason <reason>
+npm run workload:version
+npm run workload:destroy
+```
+
+The smoke command signs real API requests with the active AWS credentials, repeats the
+POST to prove idempotent admission, polls GET until the Order is `CONFIRMED`, and
+verifies that Inventory is `COMMITTED`, Payment is `CAPTURED`, and Fulfillment is
+`HANDED_OFF`. It then waits for the
+committed `OrderPending` fact in the audit table, republishes that
+event alongside a distinct event, and proves the audit consumer deduplicates the replay
+without dropping the distinct fact. Destroy removes the ephemeral workload and verifies
+that the foundation stack remains.
+
+`workload:expiry` runs the deployed expiry evidence suite. It covers the workflow deadline,
+an abandoned reservation, duplicate sweeps, duplicate release delivery, and a real DynamoDB
+commit-versus-expiry race. It uses four uniquely named checkouts and requires
+`CHECKOUT_REQUEST_CEILING` to be at least `4`.
+
+`workload:failure` runs fourteen deployed scenarios through the immutable workflow alias. It
+asserts Inventory rejection, deterministic Payment failures, capture reconciliation, post-capture
+Inventory commit failure, reverse-order compensation, replay without duplicate effects, customer
+Order status, exhausted refund and Inventory-release reconciliation, rejected Fulfillment
+cancellation, audited replay and eventual resolution, durable operation-ledger results, emitted
+outbox facts, and bounded transitions.
+
+`workload:version` publishes a harmless new immutable revision, moves `LIVE` forward, and
+admits a Checkout whose Saga record identifies that version. While an isolated probe remains
+active on the old version, the command rolls `LIVE` back and proves that only the next Checkout
+uses the old version; the already-admitted Checkout remains associated with the new version.
+It then points `LIVE` forward again, aborts and redrives the probe, and verifies that AWS keeps
+the same execution ARN and original workflow version while the pinned Payment handler accepts
+a read-only v1 retrieval command. Cleanup restores the original mutable
+definition and leaves `LIVE` rolled back; both immutable versions remain available for active
+work and later redrives. This command changes deployed alias routing while it runs and should
+not be run concurrently with a deployment.
+
+The Stripe adapter contract is intentionally small and must not be used as a load test. With
+AWS credentials for the sandbox account configured and the foundation secret populated, run:
+
+```powershell
+$env:RUN_STRIPE_SANDBOX_TESTS = "true"
+npm run test:stripe
+```
+
+The suite uses Stripe test Payment Methods and proves manual authorization, stable idempotent
+replay, retrieval, capture, cancellation before capture, refund after capture, and business
+rejection. Normal load and failure evidence continues to use `PAYMENT_PROVIDER_MODE=fake`.
+It writes provider plans only through the narrowly scoped test role and requires
+`CHECKOUT_REQUEST_CEILING` to be at least `14`.
+
+Set `WORKLOAD_PROFILE=production-reference` before `workload:synth` to generate the
+production-reference template without the failure-plan table, role, environment variables,
+or read policies. The default `sandbox` profile retains the test control plane.

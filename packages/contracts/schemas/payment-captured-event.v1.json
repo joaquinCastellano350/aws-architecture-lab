@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:payment:captured-event:v1",
+  "title": "PaymentCapturedEvent",
+  "type": "object",
+  "required": ["eventId", "eventType", "eventVersion", "occurredAt", "correlationId", "causationId", "aggregateType", "aggregateId", "payload"],
+  "properties": {
+    "eventId": { "type": "string", "minLength": 1 },
+    "eventType": { "type": "string", "const": "PaymentCaptured" },
+    "eventVersion": { "type": "string", "const": "1.0" },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "correlationId": { "type": "string", "minLength": 1 },
+    "causationId": { "type": "string", "minLength": 1 },
+    "aggregateType": { "type": "string", "const": "Payment" },
+    "aggregateId": { "type": "string", "minLength": 1 },
+    "payload": { "type": "object", "required": ["checkoutId", "paymentId", "providerReference", "status"], "properties": { "checkoutId": { "type": "string", "minLength": 1 }, "paymentId": { "type": "string", "minLength": 1 }, "providerReference": { "type": "string", "minLength": 1 }, "status": { "type": "string", "const": "CAPTURED" } }, "additionalProperties": true }
+  },
+  "additionalProperties": true
+}

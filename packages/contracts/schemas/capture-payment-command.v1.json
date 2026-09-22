@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:payment:capture-command:v1",
+  "title": "CapturePaymentCommand",
+  "type": "object",
+  "required": ["schemaVersion", "commandType", "operationId", "checkoutId", "paymentId", "correlationId", "causationId"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "commandType": { "type": "string", "const": "CapturePayment" },
+    "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "paymentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "causationId": { "type": "string", "minLength": 1, "maxLength": 256 }
+  },
+  "additionalProperties": true
+}

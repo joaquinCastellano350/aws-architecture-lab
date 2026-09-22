@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:reconciliation:required-event:v1",
+  "title": "ReconciliationRequiredEvent",
+  "type": "object",
+  "required": ["eventId", "eventType", "eventVersion", "occurredAt", "correlationId", "causationId", "aggregateType", "aggregateId", "payload"],
+  "properties": {
+    "eventId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "eventType": { "type": "string", "const": "ReconciliationRequired" },
+    "eventVersion": { "type": "string", "const": "1.0" },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "causationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "aggregateType": { "type": "string", "const": "Reconciliation" },
+    "aggregateId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "payload": {
+      "type": "object",
+      "required": ["checkoutId", "status", "failedInvariant", "requiredAction", "attempts", "workflowVersionArn"],
+      "properties": {
+        "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "status": { "type": "string", "const": "RECONCILIATION_REQUIRED" },
+        "failedInvariant": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "requiredAction": { "type": "string", "enum": ["COMPENSATE_INVENTORY", "COMPENSATE_PAYMENT_AUTHORIZATION", "COMPENSATE_RESERVED_FULFILLMENT", "COMPENSATE_CAPTURED_PAYMENT", "RECOVER_FULFILLMENT_HANDOFF", "CONFIRM_ORDER"] },
+        "attempts": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "workflowVersionArn": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

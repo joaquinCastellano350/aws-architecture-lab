@@ -1,0 +1,91 @@
+{
+  "fixtureVersion": "workflow-v1",
+  "orderPending": {
+    "eventId": "order-pending-from-workflow-v1",
+    "eventType": "OrderPending",
+    "eventVersion": "1.0",
+    "occurredAt": "2026-09-18T15:00:00.000Z",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1",
+    "aggregateType": "Order",
+    "aggregateId": "checkout-from-workflow-v1",
+    "payload": { "status": "PENDING" }
+  },
+  "orderCompensating": {
+    "eventId": "order-compensating-from-workflow-v1",
+    "eventType": "OrderCompensating",
+    "eventVersion": "1.0",
+    "occurredAt": "2026-09-18T15:00:00.000Z",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1",
+    "aggregateType": "Order",
+    "aggregateId": "checkout-from-workflow-v1",
+    "payload": { "status": "COMPENSATING" }
+  },
+  "inventoryReleased": {
+    "eventId": "inventory-released-from-workflow-v1",
+    "eventType": "InventoryReleased",
+    "eventVersion": "1.0",
+    "occurredAt": "2026-09-18T15:00:00.000Z",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1",
+    "aggregateType": "InventoryReservation",
+    "aggregateId": "reservation-checkout-from-workflow-v1",
+    "payload": {
+      "checkoutId": "checkout-from-workflow-v1",
+      "itemId": "item-from-workflow-v1",
+      "quantity": 1,
+      "status": "RELEASED",
+      "releaseReason": "CHECKOUT_EXPIRED"
+    }
+  },
+  "paymentRefunded": {
+    "eventId": "payment-refunded-from-workflow-v1",
+    "eventType": "PaymentRefunded",
+    "eventVersion": "1.0",
+    "occurredAt": "2026-09-18T15:00:00.000Z",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1",
+    "aggregateType": "Payment",
+    "aggregateId": "payment-checkout-from-workflow-v1",
+    "payload": {
+      "checkoutId": "checkout-from-workflow-v1",
+      "paymentId": "payment-checkout-from-workflow-v1",
+      "providerReference": "fake-payment-checkout-from-workflow-v1",
+      "status": "REFUNDED"
+    }
+  },
+  "fulfillmentCancelled": {
+    "eventId": "fulfillment-cancelled-from-workflow-v1",
+    "eventType": "FulfillmentCancelled",
+    "eventVersion": "1.0",
+    "occurredAt": "2026-09-18T15:00:00.000Z",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1",
+    "aggregateType": "Fulfillment",
+    "aggregateId": "fulfillment-checkout-from-workflow-v1",
+    "payload": {
+      "checkoutId": "checkout-from-workflow-v1",
+      "reservationId": "fulfillment-checkout-from-workflow-v1",
+      "status": "CANCELLED"
+    }
+  },
+  "reconciliationRequired": {
+    "eventId": "reconciliation-required-from-workflow-v1",
+    "eventType": "ReconciliationRequired",
+    "eventVersion": "1.0",
+    "occurredAt": "2026-09-18T15:00:00.000Z",
+    "correlationId": "correlation-from-workflow-v1",
+    "causationId": "execution-from-workflow-v1",
+    "aggregateType": "Reconciliation",
+    "aggregateId": "reconciliation-checkout-from-workflow-v1",
+    "payload": {
+      "checkoutId": "checkout-from-workflow-v1",
+      "status": "RECONCILIATION_REQUIRED",
+      "failedInvariant": "CAPTURED_PAYMENT_MUST_BE_REFUNDED",
+      "requiredAction": "COMPENSATE_CAPTURED_PAYMENT",
+      "attempts": 3,
+      "workflowVersionArn": "arn:aws:states:us-east-1:123456789012:stateMachine:checkout:1"
+    }
+  }
+}

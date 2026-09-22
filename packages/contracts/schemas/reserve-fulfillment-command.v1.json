@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aws-architecture-lab:fulfillment:reserve-command:v1",
+  "title": "ReserveFulfillmentCommand",
+  "type": "object",
+  "required": ["schemaVersion", "commandType", "operationId", "checkoutId", "reservationId", "correlationId", "causationId"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1.0" },
+    "commandType": { "type": "string", "const": "ReserveFulfillment" },
+    "operationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "checkoutId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "reservationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "causationId": { "type": "string", "minLength": 1, "maxLength": 256 }
+  },
+  "additionalProperties": true
+}
